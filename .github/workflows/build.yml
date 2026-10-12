@@ -9,7 +9,7 @@ jobs:
   build:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install XcodeGen
         run: brew install xcodegen
@@ -19,10 +19,21 @@ jobs:
 
       - name: Build (unsigned)
         run: |
+          set -o pipefail
+          xcodebuild -version | tee build.log
           xcodebuild -project Aimshot.xcodeproj -scheme Aimshot -configuration Release \
             -sdk iphoneos -destination 'generic/platform=iOS' \
             -archivePath "$RUNNER_TEMP/Aimshot.xcarchive" archive \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" 2>&1 | tee -a build.log
+
+      - name: Report build errors
+        if: failure()
+        run: |
+          enc() { sed 's/%/%25/g; s/\r//g' | awk '{printf "%s%%0A", $0}'; }
+          ERRS=$(grep -E "error:|error\b.*not installed|xcodebuild: error" build.log | sort -u | head -40 | enc)
+          [ -n "$ERRS" ] && echo "::error title=Build errors::$ERRS"
+          echo "::warning title=Build log tail::$(tail -40 build.log | enc)"
+          echo "::warning title=Xcode info::$( (xcodebuild -version; xcodebuild -showsdks; xcodebuild -list -project Aimshot.xcodeproj) 2>&1 | enc)"
 
       - name: Package .ipa
         run: |

@@ -15,7 +15,7 @@ struct ContentView: View {
                 GeometryReader { geo in
                     ZStack {
                         CameraPreview(session: camera.session)
-                        overlay(size: geo.size)
+                        frameOverlay(size: geo.size)
                     }
                     .contentShape(Rectangle())
                     .gesture(drawGesture(size: geo.size))
@@ -206,7 +206,7 @@ struct ContentView: View {
     }
 
     @ViewBuilder
-    private func overlay(size: CGSize) -> some View {
+    private func frameOverlay(size: CGSize) -> some View {
         let center = CGPoint(x: size.width / 2, y: size.height / 2)
         let aligned = camera.hint == .aligned
         let accent: Color = aligned ? .yellow : .white

@@ -27,7 +27,6 @@ final class CameraModel: NSObject, ObservableObject {
     private let videoOutput = AVCaptureVideoDataOutput()
     private var configured = false
     private var photoDelegate: PhotoCaptureDelegate?
-    private let haptic = UIImpactFeedbackGenerator(style: .medium)
 
     // MARK: Vision state (videoQueue only)
     /// Back camera frames arrive sideways; .right turns them upright for Vision.
@@ -203,7 +202,7 @@ final class CameraModel: NSObject, ObservableObject {
         DispatchQueue.main.async {
             self.targetRect = rect
             self.hint = aligned ? .aligned : .move(dx: dx, dy: dy)
-            if justAligned { self.haptic.impactOccurred() }
+            if justAligned { UIImpactFeedbackGenerator(style: .medium).impactOccurred() }
         }
     }
 
