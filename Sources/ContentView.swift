@@ -3,7 +3,12 @@ import SwiftUI
 struct ContentView: View {
     @StateObject private var camera = CameraModel()
     @State private var dragRect: CGRect? = nil
+    @State private var showSettings = false
+    @AppStorage("autoShoot") private var autoShoot = true
     @Environment(\.scenePhase) private var scenePhase
+
+    private let green = Color(red: 0.30, green: 0.85, blue: 0.40)
+    private let yellow = Color(red: 1.0, green: 0.82, blue: 0.0)
 
     var body: some View {
         ZStack {
@@ -19,22 +24,27 @@ struct ContentView: View {
                     }
                     .contentShape(Rectangle())
                     .gesture(drawGesture(size: geo.size))
+                    .clipped()
                 }
                 .aspectRatio(3.0 / 4.0, contentMode: .fit)
 
-                Text(hintText)
-                    .font(.subheadline.weight(.medium))
-                    .foregroundColor(camera.hint == .aligned ? .yellow : .white)
+                Text(camera.hint)
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundColor(hintColor)
+                    .lineLimit(2)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 24)
-                    .padding(.vertical, 12)
+                    .padding(.top, 12)
                     .frame(maxWidth: .infinity)
+
+                zoomPills
+                    .padding(.top, 10)
 
                 Spacer(minLength: 0)
 
                 controls
-                    .padding(.horizontal, 32)
-                    .padding(.bottom, 24)
+                    .padding(.horizontal, 36)
+                    .padding(.bottom, 20)
             }
 
             if let text = camera.toast {
@@ -42,9 +52,11 @@ struct ContentView: View {
                     Text(text)
                         .font(.subheadline.weight(.semibold))
                         .foregroundColor(.black)
+                        .multilineTextAlignment(.center)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 10)
                         .background(Capsule().fill(Color.white))
+                        .padding(.horizontal, 24)
                         .padding(.top, 60)
                     Spacer()
                 }
@@ -57,6 +69,7 @@ struct ContentView: View {
         }
         .animation(.easeInOut(duration: 0.2), value: camera.toast)
         .statusBarHidden(true)
+        .sheet(isPresented: $showSettings) { SettingsView() }
         .onAppear { camera.start() }
         .onChange(of: scenePhase) { phase in
             if phase == .active {
@@ -67,40 +80,93 @@ struct ContentView: View {
         }
     }
 
-    // MARK: Pieces
+    // MARK: Top bar
 
     private var topBar: some View {
-        HStack {
+        HStack(spacing: 12) {
             Text("Aimshot")
                 .font(.headline)
                 .foregroundColor(.white)
+            Text("4:5")
+                .font(.caption.weight(.bold))
+                .foregroundColor(.white.opacity(0.7))
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.white.opacity(0.4), lineWidth: 1))
             Spacer()
-            Text("v0.1")
-                .font(.caption)
-                .foregroundColor(.white.opacity(0.4))
+            Button {
+                autoShoot.toggle()
+            } label: {
+                Text("AUTO")
+                    .font(.caption.weight(.bold))
+                    .foregroundColor(autoShoot ? .black : .white.opacity(0.7))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(Capsule().fill(autoShoot ? yellow : Color.white.opacity(0.12)))
+            }
+            .buttonStyle(.plain)
+            Button {
+                showSettings = true
+            } label: {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 19, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(width: 36, height: 36)
+            }
+            .buttonStyle(.plain)
         }
         .padding(.horizontal, 20)
-        .frame(height: 44)
+        .frame(height: 48)
     }
 
-    private var hintText: String {
-        switch camera.hint {
-        case .none:
-            return camera.isScanning
-                ? "Finding the shot…"
-                : "Tap Scan, or drag on the screen to draw your own frame"
-        case .lost:
-            return "Lost the frame. Scan again."
-        case .aligned:
-            return "Lined up. Take the shot!"
-        case .move(let dx, let dy):
-            var parts: [String] = []
-            if abs(dx) > 0.035 { parts.append(dx > 0 ? "right" : "left") }
-            if abs(dy) > 0.035 { parts.append(dy > 0 ? "up" : "down") }
-            if parts.isEmpty { return "Almost…" }
-            return "Aim " + parts.joined(separator: " and ") + " until the dot is in the ring"
+    private var hintColor: Color {
+        switch camera.phase {
+        case .ready: return green
+        case .zooming: return yellow
+        case .idle: return .white.opacity(0.6)
+        default: return .white
         }
     }
+
+    // MARK: Zoom buttons
+
+    private var zoomPills: some View {
+        let current = camera.displayZoom
+        var stops = camera.zoomStops
+        if !stops.contains(where: { abs($0 - current) < 0.05 }) {
+            stops.append((current * 10).rounded() / 10)
+            stops.sort()
+        }
+        return HStack(spacing: 12) {
+            ForEach(stops, id: \.self) { s in
+                let active = abs(s - current) < 0.06
+                Button {
+                    camera.selectZoom(s)
+                } label: {
+                    Text(zoomLabel(s, active: active))
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(active ? yellow : .white.opacity(0.8))
+                        .frame(width: 46, height: 46)
+                        .background(Circle().fill(active ? yellow.opacity(0.18) : Color.white.opacity(0.1)))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private func zoomLabel(_ z: Double, active: Bool) -> String {
+        let s: String
+        if z < 0.95 {
+            s = String(format: ".%.0f", z * 10)
+        } else if abs(z - z.rounded()) < 0.05 {
+            s = String(format: "%.0f", z)
+        } else {
+            s = String(format: "%.1f", z)
+        }
+        return s + (active ? "×" : "x")
+    }
+
+    // MARK: Bottom controls
 
     private var controls: some View {
         HStack {
@@ -125,7 +191,7 @@ struct ContentView: View {
                     Color.white.opacity(0.1)
                 }
             }
-            .frame(width: 52, height: 52)
+            .frame(width: 54, height: 54)
             .clipShape(RoundedRectangle(cornerRadius: 10))
             .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.white.opacity(0.3), lineWidth: 1))
         }
@@ -133,42 +199,49 @@ struct ContentView: View {
     }
 
     private var shutter: some View {
-        let aligned = camera.hint == .aligned
+        let ready = camera.phase == .ready
         return Button {
             camera.capture()
         } label: {
             ZStack {
                 Circle()
-                    .stroke(aligned ? Color.yellow : Color.white, lineWidth: 4)
-                    .frame(width: 78, height: 78)
+                    .stroke(Color.white, lineWidth: 4)
+                    .frame(width: 80, height: 80)
                 Circle()
-                    .fill(aligned ? Color.yellow : Color.white)
-                    .frame(width: 64, height: 64)
+                    .trim(from: 0, to: CGFloat(camera.shootProgress))
+                    .stroke(green, style: StrokeStyle(lineWidth: 4, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                    .frame(width: 80, height: 80)
+                Circle()
+                    .fill(ready ? green : Color.white)
+                    .frame(width: 66, height: 66)
             }
-            .shadow(color: aligned ? Color.yellow.opacity(0.9) : Color.clear, radius: aligned ? 16 : 0)
-            .scaleEffect(aligned ? 1.06 : 1.0)
-            .animation(.easeInOut(duration: 0.25), value: aligned)
+            .shadow(color: ready ? green.opacity(0.8) : .clear, radius: ready ? 14 : 0)
+            .animation(.easeInOut(duration: 0.2), value: ready)
         }
         .buttonStyle(.plain)
+        .disabled(camera.isShooting)
     }
 
     private var scanButton: some View {
-        let hasFrame = camera.targetRect != nil
+        let busy = camera.target != nil || camera.phase == .scanning
         return Button {
-            if hasFrame { camera.clearFrame() } else { camera.scan() }
+            if busy { camera.clearTarget() } else { camera.scan() }
         } label: {
-            VStack(spacing: 4) {
-                Image(systemName: hasFrame ? "xmark" : "sparkles")
-                    .font(.system(size: 22, weight: .semibold))
-                Text(hasFrame ? "Clear" : "Scan")
-                    .font(.caption.weight(.semibold))
+            ZStack {
+                Circle()
+                    .fill(busy ? Color.white.opacity(0.12) : yellow.opacity(0.22))
+                    .frame(width: 64, height: 64)
+                if camera.phase == .scanning {
+                    ProgressView().tint(yellow)
+                } else {
+                    Image(systemName: busy ? "xmark" : "sparkles")
+                        .font(.system(size: 24, weight: .semibold))
+                        .foregroundColor(busy ? .white : yellow)
+                }
             }
-            .foregroundColor(.white)
-            .frame(width: 60, height: 60)
         }
         .buttonStyle(.plain)
-        .disabled(camera.isScanning)
-        .opacity(camera.isScanning ? 0.4 : 1)
     }
 
     private var permissionView: some View {
@@ -195,7 +268,7 @@ struct ContentView: View {
         .background(Color.black)
     }
 
-    // MARK: Overlay
+    // MARK: Overlay on the camera view
 
     /// Vision rect (normalized, origin bottom-left) -> view rect (points, origin top-left).
     private func viewRect(_ r: CGRect, in size: CGSize) -> CGRect {
@@ -208,53 +281,83 @@ struct ContentView: View {
     @ViewBuilder
     private func frameOverlay(size: CGSize) -> some View {
         let center = CGPoint(x: size.width / 2, y: size.height / 2)
-        let aligned = camera.hint == .aligned
-        let accent: Color = aligned ? .yellow : .white
+        let ready = camera.phase == .ready
+        let accent = ready ? green : yellow
+        let level = abs(camera.roll) < 0.02
 
         ZStack {
+            // Rule-of-thirds grid.
+            Path { p in
+                for i in 1...2 {
+                    let x = size.width * CGFloat(i) / 3
+                    let y = size.height * CGFloat(i) / 3
+                    p.move(to: CGPoint(x: x, y: 0))
+                    p.addLine(to: CGPoint(x: x, y: size.height))
+                    p.move(to: CGPoint(x: 0, y: y))
+                    p.addLine(to: CGPoint(x: size.width, y: y))
+                }
+            }
+            .stroke(Color.white.opacity(0.35), lineWidth: 0.5)
+
+            // Level line: stays flat with the world as you tilt.
+            Rectangle()
+                .fill(level ? green : yellow)
+                .frame(width: size.width * 0.4, height: 1.5)
+                .rotationEffect(.radians(-camera.roll))
+                .position(center)
+
             if let d = dragRect {
-                Rectangle()
+                RoundedRectangle(cornerRadius: 14)
                     .stroke(Color.white, style: StrokeStyle(lineWidth: 2, dash: [8, 6]))
                     .frame(width: d.width, height: d.height)
                     .position(x: d.midX, y: d.midY)
-            } else if let t = camera.targetRect {
-                let r = viewRect(t, in: size)
+            } else if let t = camera.target, let fr = camera.frameRect {
+                let r = viewRect(fr, in: size)
 
-                // Dim everything outside the frame.
-                Path { p in
-                    p.addRect(CGRect(origin: .zero, size: size))
-                    p.addRect(r)
-                }
-                .fill(Color.black.opacity(0.4), style: FillStyle(eoFill: true))
-
-                Rectangle()
-                    .stroke(accent, lineWidth: aligned ? 3 : 2)
-                    .frame(width: r.width, height: r.height)
-                    .position(x: r.midX, y: r.midY)
-
-                if !aligned {
+                if camera.phase == .guiding {
                     Path { p in
                         p.move(to: center)
                         p.addLine(to: CGPoint(x: r.midX, y: r.midY))
                     }
-                    .stroke(Color.white.opacity(0.6), style: StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
+                    .stroke(yellow.opacity(0.9), style: StrokeStyle(lineWidth: 2, dash: [6, 6]))
                 }
 
-                // The dot: where the frame's centre is right now.
-                Circle()
-                    .fill(accent)
-                    .frame(width: 12, height: 12)
+                RoundedRectangle(cornerRadius: 14)
+                    .stroke(accent, lineWidth: 3)
+                    .frame(width: r.width, height: r.height)
                     .position(x: r.midX, y: r.midY)
+
+                subjectLabel(t.subject, ready: ready)
+                    .position(x: min(max(r.midX, 90), size.width - 90),
+                              y: min(r.maxY + 24, size.height - 20))
             }
 
-            // The ring: where you're aiming.
-            Circle()
-                .stroke(aligned ? Color.yellow : Color.white.opacity(0.8), lineWidth: 2)
-                .frame(width: 44, height: 44)
-                .position(center)
+            // Crosshair: where you're aiming.
+            ZStack {
+                Rectangle().fill(ready ? green : Color.white.opacity(0.85)).frame(width: 18, height: 1.5)
+                Rectangle().fill(ready ? green : Color.white.opacity(0.85)).frame(width: 1.5, height: 18)
+            }
+            .position(center)
+
+            if camera.flash {
+                Color.white.opacity(0.8)
+            }
         }
         .allowsHitTesting(false)
-        .animation(.easeOut(duration: 0.12), value: camera.targetRect)
+    }
+
+    private func subjectLabel(_ text: String, ready: Bool) -> some View {
+        HStack(spacing: 6) {
+            if ready {
+                Circle().fill(green).frame(width: 7, height: 7)
+            }
+            Text(text)
+                .font(.system(size: 15, weight: .semibold))
+        }
+        .foregroundColor(ready ? green : yellow)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Capsule().fill(Color.black.opacity(0.55)))
     }
 
     // MARK: Draw your own frame
