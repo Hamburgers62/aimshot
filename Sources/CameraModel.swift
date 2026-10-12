@@ -246,7 +246,8 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
             lose()
             return
         }
-        guard let observation = request.results?.first, observation.confidence > 0.3 else {
+        guard let observation = request.results?.first as? VNDetectedObjectObservation,
+              observation.confidence > 0.3 else {
             lose()
             return
         }
