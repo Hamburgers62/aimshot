@@ -92,6 +92,7 @@ struct AimTarget: Equatable {
     var score: Int = 0            // AI's 1-10 rating (0 = not rated)
     var exposure: Double = 0      // AI's suggested exposure tweak in EV
     var refined: Bool = false     // already fine-tuned up close
+    var style: String = ""        // kind of shot (portrait, glow, reflection…), used to match a look
 }
 
 /// Field of view of the upright (portrait) camera view at videoZoomFactor 1.
@@ -142,7 +143,7 @@ enum AimMath {
     /// A Vision rect in the portrait preview, seen at attitude `r` and `zoom` -> a target in the room.
     static func target(from rect: CGRect, r: simd_double3x3, zoom: Double, geo: CameraGeometry,
                        landscape: Bool, subject: String, why: String,
-                       score: Int = 0, exposure: Double = 0) -> AimTarget {
+                       score: Int = 0, exposure: Double = 0, style: String = "") -> AimTarget {
         let hw = geo.halfW(zoom: zoom)
         let hh = geo.halfH(zoom: zoom)
         let x = (Double(rect.midX) - 0.5) * 2 * hw
@@ -156,7 +157,8 @@ enum AimMath {
                          subject: subject,
                          why: why,
                          score: score,
-                         exposure: exposure)
+                         exposure: exposure,
+                         style: style)
     }
 
     /// Where the target sits in the portrait preview now (Vision rect). nil if it's behind you.

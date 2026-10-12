@@ -665,7 +665,7 @@ final class CameraModel: NSObject, ObservableObject {
             let portraitBox = OrientMath.toPortrait(shot.box, from: orient)
             return AimMath.target(from: OrientMath.flipY(portraitBox), r: r, zoom: zoom, geo: geo,
                                   landscape: orient.isLandscape, subject: shot.subject, why: shot.why,
-                                  score: shot.score, exposure: shot.exposure)
+                                  score: shot.score, exposure: shot.exposure, style: shot.style)
         }
         ideaIndex = 0
         if let first = ideas.first { activate(first) }
@@ -712,7 +712,7 @@ final class CameraModel: NSObject, ObservableObject {
             let portraitBox = OrientMath.toPortrait(box, from: orient)
             next = AimMath.target(from: OrientMath.flipY(portraitBox), r: r, zoom: zoom, geo: geo,
                                   landscape: orient.isLandscape, subject: t.subject, why: t.why,
-                                  score: t.score, exposure: t.exposure)
+                                  score: t.score, exposure: t.exposure, style: t.style)
         }
         next.refined = true
         target = next
@@ -802,6 +802,7 @@ final class CameraModel: NSObject, ObservableObject {
         let subject = target?.subject ?? "photo"
         let why = target?.why ?? ""
         let score = (target?.score ?? 0) > 0 ? target?.score : nil
+        let matched = Self.matchedLook(style: target?.style ?? "", lowLight: isLowLight)
         let wantRaw = rawSupported && UserDefaults.standard.bool(forKey: "raw")
         let flashMode = FlashSetting.current.mode
 
@@ -821,7 +822,7 @@ final class CameraModel: NSObject, ObservableObject {
                 }
             }
             let delegate = PhotoCaptureDelegate { [weak self] result in
-                self?.finishCapture(result, crop: crop, subject: subject, why: why, score: score)
+                self?.finishCapture(result, crop: crop, subject: subject, why: why, score: score, matched: matched)
             }
             self.photoDelegate = delegate
             self.photoOutput.capturePhoto(with: settings, delegate: delegate)
@@ -848,7 +849,22 @@ final class CameraModel: NSObject, ObservableObject {
 
     /// Runs on main. Frees the shutter straight away, then develops and saves in the background:
     /// to Photos (with your default look or an AI-picked edit) and to the shot history.
-    private func finishCapture(_ result: CaptureResult, crop: CGRect?, subject: String, why: String, score: Int?) {
+    /// A look that suits the kind of shot (only used when you haven't set one yourself).
+    static func matchedLook(style: String, lowLight: Bool) -> String? {
+        guard UserDefaults.standard.object(forKey: "matchLook") as? Bool ?? true else { return nil }
+        switch style {
+        case "portrait": return "soft"
+        case "glow": return lowLight ? "ember" : "golden"
+        case "reflection": return "tide"
+        case "stilllife": return "natural"
+        case "geometry": return "slide"
+        case "texture": return "faded"
+        default: return nil
+        }
+    }
+
+    private func finishCapture(_ result: CaptureResult, crop: CGRect?, subject: String, why: String, score: Int?,
+                               matched: String?) {
         sessionQueue.async { self.photoDelegate = nil }
         isShooting = false
         if target != nil { clearTarget(resetZoom: true) }
@@ -872,6 +888,9 @@ final class CameraModel: NSObject, ObservableObject {
             let clean = final.cgImage.flatMap { PhotoSaver.encode($0, metadata: metadata) } ?? data
 
             var edits = defaults
+            if defaults.isPlain, !aiEdit, let id = matched {
+                edits.apply(look: FilmLab.look(id))
+            }
             var note: String? = nil
             if aiEdit && !key.isEmpty,
                let small = final.preparingThumbnail(of: CGSize(width: 1024, height: 1024)),

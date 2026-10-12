@@ -7,6 +7,7 @@ struct ShotIdea {
     var box: CGRect   // normalized, origin top-left, in the image that was sent
     var score: Int = 0
     var exposure: Double = 0
+    var style: String = ""
 }
 
 struct ScanResult {
@@ -62,6 +63,8 @@ enum AIScout {
         You are the eye of a photography app. This image is the live camera view, \(width)x\(height) pixels, phone held \(held).
 
         Find \(howMany) hiding in this view: the subjects or details a good photographer would walk up to and shoot. Look for warm or dramatic light, glowing objects, texture, reflections, strong shapes, a clear subject against a simple background. Avoid screens, clutter, half-cut objects, messy backgrounds and empty areas.
+
+        Hard rules: only pick things that will still be there in ten seconds (nothing walking or driving away). Never just frame the middle of the view or the whole scene; find a specific detail, so each crop is at most two thirds of the view's width.
         \(style.promptLine)
 
         Be picky and honest. Score each shot 1-10 for how good the final photo would really look. Name the subject exactly as it is (don't call a laptop a magazine). If nothing here would score 5 or more, return an empty list and say where to point instead.
@@ -70,10 +73,12 @@ enum AIScout {
 
         Each photo is a \(aspectLabel) \(shape) crop (width:height = \(aspectLabel)). Frame tight: the subject should fill most of the crop, with only a little breathing room. For people, crop close around the face and hands, not the whole room. Crops can be much smaller than the whole view, because the app zooms in.
 
+        style is one word for the kind of shot: portrait, glow (light sources, warm lamps, signs), reflection, stilllife (one object), geometry (lines, symmetry, architecture) or texture.
+
         exposure is a tweak in stops from -1 to 1: negative for bright lights, signs and screens so they don't blow out, positive for dim subjects, 0 if fine.
 
         Reply with ONLY this JSON, no markdown, no other text:
-        {"shots": [{"subject": "2-4 word name, lowercase", "why": "coaching line, max 8 words, lowercase, e.g. soft side light, let the color glow", "score": 1-10, "exposure": -1.0-1.0, "box": [x, y, width, height]}], "tip": "only if the list is empty: where to point instead, max 10 words"}
+        {"shots": [{"subject": "2-4 word name, lowercase", "why": "coaching line, max 8 words, lowercase, e.g. soft side light, let the color glow", "score": 1-10, "style": "one word", "exposure": -1.0-1.0, "box": [x, y, width, height]}], "tip": "only if the list is empty: where to point instead, max 10 words"}
 
         box is in pixels of this image, origin top-left, and must contain the whole subject.
         """
@@ -106,9 +111,10 @@ enum AIScout {
             let why = (item["why"] as? String) ?? (item["reason"] as? String) ?? ""
             let score = Int((number(item["score"]) ?? 6).rounded())
             let exposure = min(max(number(item["exposure"]) ?? 0, -1), 1)
+            let style = ((item["style"] as? String) ?? "").lowercased().replacingOccurrences(of: " ", with: "")
             return ShotIdea(subject: subject.lowercased(), why: why.lowercased(),
                             box: frame(box: b, fullW: fullW, fullH: fullH, wOverH: wOverH),
-                            score: min(max(score, 1), 10), exposure: exposure)
+                            score: min(max(score, 1), 10), exposure: exposure, style: style)
         }
         // Drop weak ideas; best first.
         let good = ideas.filter { $0.score >= 5 }.sorted { $0.score > $1.score }

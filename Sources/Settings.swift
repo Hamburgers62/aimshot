@@ -258,6 +258,7 @@ struct SettingsView: View {
     @AppStorage("autoScan") private var autoScan: Bool = false
     @AppStorage("aiEditNew") private var aiEditNew: Bool = false
     @AppStorage("refine") private var refine: Bool = true
+    @AppStorage("matchLook") private var matchLook: Bool = true
     @AppStorage("startLens") private var startLens: String = "wide"
     @AppStorage("showGrid") private var showGrid: Bool = true
     @AppStorage("showLevel") private var showLevel: Bool = true
@@ -378,6 +379,7 @@ struct SettingsView: View {
                 // Automation
                 Section {
                     Toggle("Fine-tune framing up close", isOn: $refine)
+                    Toggle("Match the look to the shot", isOn: $matchLook)
                     Toggle("Auto-shoot when lined up", isOn: $autoShoot)
                     Toggle("Auto-scan when you hold still", isOn: $autoScan)
                     Toggle("AI-edit every new shot", isOn: $aiEditNew)
