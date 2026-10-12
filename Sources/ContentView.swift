@@ -3,12 +3,20 @@ import SwiftUI
 struct ContentView: View {
     @StateObject private var camera = CameraModel()
     @State private var dragRect: CGRect? = nil
+    @State private var focusPoint: CGPoint? = nil
     @State private var showSettings = false
     @AppStorage("autoShoot") private var autoShoot = true
+    @AppStorage("aspect") private var aspectRaw = ShotAspect.fourFive.rawValue
+    @AppStorage("raw") private var rawOn = false
+    @AppStorage("flash") private var flashRaw = FlashSetting.off.rawValue
     @Environment(\.scenePhase) private var scenePhase
 
     private let green = Color(red: 0.30, green: 0.85, blue: 0.40)
     private let yellow = Color(red: 1.0, green: 0.82, blue: 0.0)
+
+    private var aspect: ShotAspect { ShotAspect(rawValue: aspectRaw) ?? .fourFive }
+    private var flashSetting: FlashSetting { FlashSetting(rawValue: flashRaw) ?? .off }
+    private var iconAngle: Angle { .degrees(camera.orientation.iconDegrees) }
 
     var body: some View {
         ZStack {
@@ -19,11 +27,19 @@ struct ContentView: View {
 
                 GeometryReader { geo in
                     ZStack {
-                        CameraPreview(session: camera.session)
+                        CameraPreview(session: camera.session,
+                                      onLayer: { camera.previewLayer = $0 },
+                                      onHardwareShutter: { camera.capture() })
                         frameOverlay(size: geo.size)
                     }
                     .contentShape(Rectangle())
                     .gesture(drawGesture(size: geo.size))
+                    .simultaneousGesture(
+                        SpatialTapGesture().onEnded { value in
+                            camera.focus(atLayerPoint: value.location)
+                            showFocus(at: value.location)
+                        }
+                    )
                     .clipped()
                 }
                 .aspectRatio(3.0 / 4.0, contentMode: .fit)
@@ -36,6 +52,21 @@ struct ContentView: View {
                     .padding(.horizontal, 24)
                     .padding(.top, 12)
                     .frame(maxWidth: .infinity)
+
+                if camera.ideas.count > 1 && camera.target != nil {
+                    Button {
+                        camera.nextIdea()
+                    } label: {
+                        Text("Idea \(camera.ideaIndex + 1) of \(camera.ideas.count)  ·  Next ›")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(yellow)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 6)
+                            .background(Capsule().fill(yellow.opacity(0.15)))
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 6)
+                }
 
                 zoomPills
                     .padding(.top, 10)
@@ -68,6 +99,7 @@ struct ContentView: View {
             }
         }
         .animation(.easeInOut(duration: 0.2), value: camera.toast)
+        .animation(.easeInOut(duration: 0.25), value: camera.orientation)
         .statusBarHidden(true)
         .sheet(isPresented: $showSettings) { SettingsView() }
         .onAppear { camera.start() }
@@ -80,20 +112,58 @@ struct ContentView: View {
         }
     }
 
+    private func showFocus(at point: CGPoint) {
+        focusPoint = point
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            if focusPoint == point { focusPoint = nil }
+        }
+    }
+
     // MARK: Top bar
 
     private var topBar: some View {
-        HStack(spacing: 12) {
-            Text("Aimshot")
-                .font(.headline)
-                .foregroundColor(.white)
-            Text("4:5")
-                .font(.caption.weight(.bold))
-                .foregroundColor(.white.opacity(0.7))
-                .padding(.horizontal, 7)
-                .padding(.vertical, 3)
-                .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.white.opacity(0.4), lineWidth: 1))
+        HStack(spacing: 10) {
+            Button {
+                aspectRaw = aspect.next.rawValue
+            } label: {
+                Text(aspect.label(landscape: camera.orientation.isLandscape))
+                    .font(.caption.weight(.bold))
+                    .foregroundColor(.white)
+                    .frame(minWidth: 34)
+                    .padding(.vertical, 5)
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white.opacity(0.5), lineWidth: 1))
+                    .rotationEffect(iconAngle)
+            }
+            .buttonStyle(.plain)
+
+            if camera.rawSupported {
+                Button {
+                    rawOn.toggle()
+                } label: {
+                    Text("RAW")
+                        .font(.caption.weight(.bold))
+                        .foregroundColor(rawOn ? .black : .white.opacity(0.7))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(rawOn ? yellow : Color.white.opacity(0.12)))
+                        .rotationEffect(iconAngle)
+                }
+                .buttonStyle(.plain)
+            }
+
+            Button {
+                flashRaw = flashSetting.next.rawValue
+            } label: {
+                Image(systemName: flashSetting.icon)
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundColor(flashSetting == .off ? .white : yellow)
+                    .frame(width: 34, height: 34)
+                    .rotationEffect(iconAngle)
+            }
+            .buttonStyle(.plain)
+
             Spacer()
+
             Button {
                 autoShoot.toggle()
             } label: {
@@ -103,8 +173,10 @@ struct ContentView: View {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
                     .background(Capsule().fill(autoShoot ? yellow : Color.white.opacity(0.12)))
+                    .rotationEffect(iconAngle)
             }
             .buttonStyle(.plain)
+
             Button {
                 showSettings = true
             } label: {
@@ -112,11 +184,12 @@ struct ContentView: View {
                     .font(.system(size: 19, weight: .semibold))
                     .foregroundColor(.white)
                     .frame(width: 36, height: 36)
+                    .rotationEffect(iconAngle)
             }
             .buttonStyle(.plain)
         }
         .padding(.horizontal, 20)
-        .frame(height: 48)
+        .frame(height: 50)
     }
 
     private var hintColor: Color {
@@ -146,6 +219,7 @@ struct ContentView: View {
                     Text(zoomLabel(s, active: active))
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundColor(active ? yellow : .white.opacity(0.8))
+                        .rotationEffect(iconAngle)
                         .frame(width: 46, height: 46)
                         .background(Circle().fill(active ? yellow.opacity(0.18) : Color.white.opacity(0.1)))
                 }
@@ -194,6 +268,7 @@ struct ContentView: View {
             .frame(width: 54, height: 54)
             .clipShape(RoundedRectangle(cornerRadius: 10))
             .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.white.opacity(0.3), lineWidth: 1))
+            .rotationEffect(iconAngle)
         }
         .buttonStyle(.plain)
     }
@@ -238,6 +313,7 @@ struct ContentView: View {
                     Image(systemName: busy ? "xmark" : "sparkles")
                         .font(.system(size: 24, weight: .semibold))
                         .foregroundColor(busy ? .white : yellow)
+                        .rotationEffect(iconAngle)
                 }
             }
         }
@@ -278,12 +354,28 @@ struct ContentView: View {
                height: r.height * size.height)
     }
 
+    /// Where the subject name goes: just "below" the frame as you're holding the phone.
+    private func labelPosition(for r: CGRect, in size: CGSize) -> CGPoint {
+        switch camera.orientation {
+        case .portrait:
+            return CGPoint(x: min(max(r.midX, 90), size.width - 90),
+                           y: min(r.maxY + 24, size.height - 20))
+        case .landscapeTopRight:
+            return CGPoint(x: min(r.maxX + 24, size.width - 20),
+                           y: min(max(r.midY, 90), size.height - 90))
+        case .landscapeTopLeft:
+            return CGPoint(x: max(r.minX - 24, 20),
+                           y: min(max(r.midY, 90), size.height - 90))
+        }
+    }
+
     @ViewBuilder
     private func frameOverlay(size: CGSize) -> some View {
         let center = CGPoint(x: size.width / 2, y: size.height / 2)
         let ready = camera.phase == .ready
         let accent = ready ? green : yellow
-        let level = abs(camera.roll) < 0.02
+        let tilt = abs(camera.roll).truncatingRemainder(dividingBy: Double.pi / 2)
+        let level = min(tilt, Double.pi / 2 - tilt) < 0.02
 
         ZStack {
             // Rule-of-thirds grid.
@@ -328,8 +420,8 @@ struct ContentView: View {
                     .position(x: r.midX, y: r.midY)
 
                 subjectLabel(t.subject, ready: ready)
-                    .position(x: min(max(r.midX, 90), size.width - 90),
-                              y: min(r.maxY + 24, size.height - 20))
+                    .rotationEffect(iconAngle)
+                    .position(labelPosition(for: r, in: size))
             }
 
             // Crosshair: where you're aiming.
@@ -338,6 +430,14 @@ struct ContentView: View {
                 Rectangle().fill(ready ? green : Color.white.opacity(0.85)).frame(width: 1.5, height: 18)
             }
             .position(center)
+
+            // Tap-to-focus square.
+            if let fp = focusPoint {
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(yellow, lineWidth: 1.5)
+                    .frame(width: 64, height: 64)
+                    .position(fp)
+            }
 
             if camera.flash {
                 Color.white.opacity(0.8)
@@ -353,6 +453,8 @@ struct ContentView: View {
             }
             Text(text)
                 .font(.system(size: 15, weight: .semibold))
+                .lineLimit(1)
+                .fixedSize()
         }
         .foregroundColor(ready ? green : yellow)
         .padding(.horizontal, 12)

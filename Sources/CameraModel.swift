@@ -17,10 +17,13 @@ final class CameraModel: NSObject, ObservableObject {
     // MARK: UI state (main thread only)
     @Published var phase: Phase = .idle
     @Published var target: AimTarget? = nil
+    @Published var ideas: [AimTarget] = []
+    @Published var ideaIndex = 0
     /// Where the target is in the view right now (normalized Vision coords, origin bottom-left).
     @Published var frameRect: CGRect? = nil
     @Published var hint: String = "Tap ✦ to scan the scene"
     @Published var roll: Double = 0
+    @Published var orientation: ShotOrientation = .portrait
     @Published var displayZoom: Double = 1
     @Published var zoomStops: [Double] = [1]
     @Published var shootProgress: Double = 0
@@ -29,8 +32,10 @@ final class CameraModel: NSObject, ObservableObject {
     @Published var permissionDenied = false
     @Published var isShooting = false
     @Published var flash = false
+    @Published var rawSupported = false
 
     let session = AVCaptureSession()
+    weak var previewLayer: AVCaptureVideoPreviewLayer?
 
     private let sessionQueue = DispatchQueue(label: "aimshot.session")
     private let videoQueue = DispatchQueue(label: "aimshot.video")
@@ -38,7 +43,8 @@ final class CameraModel: NSObject, ObservableObject {
     private let videoOutput = AVCaptureVideoDataOutput()
     private var device: AVCaptureDevice?
     private var configured = false
-    private var photoDelegate: PhotoCaptureDelegate?
+    private var rawFormat: OSType? = nil                 // sessionQueue
+    private var photoDelegate: PhotoCaptureDelegate?     // sessionQueue
     private var zoomObservation: NSKeyValueObservation?
     private let ciContext = CIContext()
 
@@ -119,6 +125,9 @@ final class CameraModel: NSObject, ObservableObject {
         if session.canAddOutput(photoOutput) {
             session.addOutput(photoOutput)
             photoOutput.maxPhotoQualityPrioritization = .quality
+            if photoOutput.isAppleProRAWSupported {
+                photoOutput.isAppleProRAWEnabled = true
+            }
         }
 
         videoOutput.alwaysDiscardsLateVideoFrames = true
@@ -130,6 +139,12 @@ final class CameraModel: NSObject, ObservableObject {
 
         session.commitConfiguration()
         self.device = device
+
+        let raws = photoOutput.availableRawPhotoPixelFormatTypes
+        rawFormat = raws.first(where: { AVCapturePhotoOutput.isAppleProRAWPixelFormat($0) }) ?? raws.first
+        let hasRaw = rawFormat != nil
+        DispatchQueue.main.async { self.rawSupported = hasRaw }
+
         setUpZoom(for: device)
     }
 
@@ -191,7 +206,7 @@ final class CameraModel: NSObject, ObservableObject {
         if abs(display - displayZoom) > 0.01 { displayZoom = display }
     }
 
-    // MARK: Zoom
+    // MARK: Zoom + focus
 
     func selectZoom(_ display: Double) {
         targetZoom = nil
@@ -219,6 +234,41 @@ final class CameraModel: NSObject, ObservableObject {
         }
     }
 
+    /// Tap to focus and expose at a point on the preview.
+    func focus(atLayerPoint point: CGPoint) {
+        guard let layer = previewLayer else { return }
+        let p = layer.captureDevicePointConverted(fromLayerPoint: point)
+        sessionQueue.async {
+            guard let d = self.device, (try? d.lockForConfiguration()) != nil else { return }
+            if d.isFocusPointOfInterestSupported && d.isFocusModeSupported(.continuousAutoFocus) {
+                d.focusPointOfInterest = p
+                d.focusMode = .continuousAutoFocus
+            }
+            if d.isExposurePointOfInterestSupported && d.isExposureModeSupported(.continuousAutoExposure) {
+                d.exposurePointOfInterest = p
+                d.exposureMode = .continuousAutoExposure
+            }
+            d.unlockForConfiguration()
+        }
+    }
+
+    /// Back to focusing and exposing on the middle of the view.
+    private func resetFocus() {
+        sessionQueue.async {
+            guard let d = self.device, (try? d.lockForConfiguration()) != nil else { return }
+            let centre = CGPoint(x: 0.5, y: 0.5)
+            if d.isFocusPointOfInterestSupported && d.isFocusModeSupported(.continuousAutoFocus) {
+                d.focusPointOfInterest = centre
+                d.focusMode = .continuousAutoFocus
+            }
+            if d.isExposurePointOfInterestSupported && d.isExposureModeSupported(.continuousAutoExposure) {
+                d.exposurePointOfInterest = centre
+                d.exposureMode = .continuousAutoExposure
+            }
+            d.unlockForConfiguration()
+        }
+    }
+
     // MARK: Motion
 
     private func startMotion() {
@@ -234,8 +284,21 @@ final class CameraModel: NSObject, ObservableObject {
         AimMath.learnConvention(from: m)
         attitude = AimMath.matrix(m.attitude.rotationMatrix)
 
-        let newRoll = atan2(m.gravity.x, -m.gravity.y)
+        let gx = m.gravity.x
+        let gy = m.gravity.y
+        let newRoll = atan2(gx, -gy)
         if abs(newRoll - roll) > 0.003 { roll = newRoll }
+
+        // Portrait or sideways? (ignored while the phone lies flat)
+        if abs(m.gravity.z) < 0.8 {
+            var o = orientation
+            if abs(gx) > abs(gy) + 0.3 {
+                o = gx > 0 ? .landscapeTopRight : .landscapeTopLeft
+            } else if abs(gy) > abs(gx) + 0.3 {
+                o = .portrait
+            }
+            if o != orientation { orientation = o }
+        }
 
         let rr = m.rotationRate
         let spin = sqrt(rr.x * rr.x + rr.y * rr.y + rr.z * rr.z)
@@ -247,7 +310,8 @@ final class CameraModel: NSObject, ObservableObject {
     private func updateGuide(spin: Double) {
         guard let t = target, phase != .idle, phase != .scanning else { return }
 
-        guard let rect = AimMath.project(t, r: attitude, zoom: zoomFactor, geo: geometry),
+        guard let rect = AimMath.project(t, r: attitude, zoom: zoomFactor, geo: geometry,
+                                         landscapeNow: orientation.isLandscape),
               rect.midX > -0.5, rect.midX < 1.5, rect.midY > -0.5, rect.midY < 1.5 else {
             // Target is way out of view: zoom back out and point the way.
             if frameRect != nil { frameRect = nil }
@@ -269,7 +333,8 @@ final class CameraModel: NSObject, ObservableObject {
         switch phase {
         case .guiding:
             if centred {
-                let z = min(max(AimMath.fillZoom(for: t, geo: geometry), minZoom), maxZoom)
+                let fill = zoomFactor * 0.92 / Double(max(rect.width, rect.height))
+                let z = min(max(fill, minZoom), maxZoom)
                 targetZoom = z
                 phase = .zooming
                 rampZoom(to: z, rate: 2.5)
@@ -295,10 +360,7 @@ final class CameraModel: NSObject, ObservableObject {
 
         switch phase {
         case .guiding:
-            var parts: [String] = []
-            if abs(dx) > tolX { parts.append(dx > 0 ? "right" : "left") }
-            if abs(dy) > tolY { parts.append(dy > 0 ? "up" : "down") }
-            setHint(parts.isEmpty ? "Hold it there…" : "Aim \(parts.joined(separator: " and ")) at the \(t.subject)")
+            setHint(directionHint(dx: dx, dy: dy, tolX: tolX, tolY: tolY, subject: t.subject))
         case .zooming:
             setHint("Centered — framing up…")
         case .ready:
@@ -326,6 +388,28 @@ final class CameraModel: NSObject, ObservableObject {
         }
     }
 
+    /// Screen-space offsets turned into words that match how the phone is held.
+    private func directionHint(dx: Double, dy: Double, tolX: Double, tolY: Double, subject: String) -> String {
+        // In device terms: +x = screen right, +y = screen up.
+        var right = 0.0
+        var up = 0.0
+        switch orientation {
+        case .portrait:
+            right = dx; up = dy
+        case .landscapeTopRight:   // screen up points to your right
+            right = dy; up = -dx
+        case .landscapeTopLeft:    // screen up points to your left
+            right = -dy; up = dx
+        }
+        let tolRight = orientation.isLandscape ? tolY : tolX
+        let tolUp = orientation.isLandscape ? tolX : tolY
+        var parts: [String] = []
+        if abs(right) > tolRight { parts.append(right > 0 ? "right" : "left") }
+        if abs(up) > tolUp { parts.append(up > 0 ? "up" : "down") }
+        if parts.isEmpty { return "Hold it there…" }
+        return "Aim \(parts.joined(separator: " and ")) at the \(subject)"
+    }
+
     private func resetShootTimer() {
         steadySince = nil
         if shootProgress != 0 { shootProgress = 0 }
@@ -334,10 +418,9 @@ final class CameraModel: NSObject, ObservableObject {
     private func offscreenHint(_ t: AimTarget) -> String {
         let v = AimMath.toDevice(t.worldDir, attitude)
         if v.z > 0 { return "Turn around to find the \(t.subject)" }
-        var parts: [String] = []
-        if abs(v.x) > abs(v.y) * 0.5 { parts.append(v.x > 0 ? "right" : "left") }
-        if abs(v.y) > abs(v.x) * 0.5 { parts.append(v.y > 0 ? "up" : "down") }
-        return "Turn \(parts.joined(separator: " and ")) to the \(t.subject)"
+        let tolX = 0.5 * Double(max(abs(v.x), abs(v.y)))
+        return directionHint(dx: v.x, dy: v.y, tolX: tolX, tolY: tolX, subject: t.subject)
+            .replacingOccurrences(of: "Aim ", with: "Turn ")
     }
 
     private func setHint(_ s: String) {
@@ -361,7 +444,10 @@ final class CameraModel: NSObject, ObservableObject {
         let r0 = attitude
         let z0 = zoomFactor
         let geo = geometry
+        let orient = orientation
         scanZoom = zoomFactor
+        let aspect = ShotAspect.current
+        let wOverH = aspect.wOverH(landscape: orient.isLandscape)
         let key = KeyStore.load().trimmingCharacters(in: .whitespacesAndNewlines)
         let model = AIModel(rawValue: UserDefaults.standard.string(forKey: "aiModel") ?? "") ?? .sonnet
         let customModel = (UserDefaults.standard.string(forKey: "customModel") ?? "")
@@ -371,29 +457,33 @@ final class CameraModel: NSObject, ObservableObject {
             guard let self = self else { return }
 
             if key.isEmpty {
-                let rect = Composer.bestFrame(in: buffer, orientation: .right)
+                let box = Composer.bestFrame(in: buffer, orientation: orient.bufferOrientation,
+                                             wOverH: CGFloat(wOverH))
+                let idea = ShotIdea(subject: "interesting spot",
+                                    why: "basic guess, add an API key for smart picks",
+                                    box: box)
                 DispatchQueue.main.async {
                     guard token == self.scanToken else { return }
-                    self.setTarget(rect: rect, r: r0, zoom: z0, geo: geo,
-                                   subject: "interesting spot",
-                                   why: "basic guess, add an API key for smart picks")
+                    self.setIdeas([idea], r: r0, zoom: z0, geo: geo, orient: orient)
                 }
                 return
             }
 
-            guard let snap = self.makeJPEG(buffer) else {
+            guard let snap = self.makeJPEG(buffer, orientation: orient.bufferOrientation) else {
                 DispatchQueue.main.async { self.scanFailed("Couldn't read the camera", token: token) }
                 return
             }
 
             Task {
                 do {
-                    let idea = try await AIScout.findShot(jpeg: snap.data, width: snap.width, height: snap.height,
-                                                          apiKey: key, model: model, customModel: customModel)
+                    let shots = try await AIScout.findShots(
+                        jpeg: snap.data, width: snap.width, height: snap.height,
+                        apiKey: key, model: model, customModel: customModel,
+                        aspectLabel: aspect.label(landscape: orient.isLandscape),
+                        landscape: orient.isLandscape, wOverH: wOverH)
                     await MainActor.run {
                         guard token == self.scanToken else { return }
-                        self.setTarget(rect: idea.rect, r: r0, zoom: z0, geo: geo,
-                                       subject: idea.subject, why: idea.why)
+                        self.setIdeas(shots, r: r0, zoom: z0, geo: geo, orient: orient)
                     }
                 } catch {
                     await MainActor.run { self.scanFailed(error.localizedDescription, token: token) }
@@ -409,19 +499,43 @@ final class CameraModel: NSObject, ObservableObject {
         showToast(message)
     }
 
-    /// Your own frame: the user drew a box (normalized Vision coords).
+    /// Your own frame: the user drew a box (normalized Vision coords in the preview).
     func setCustomFrame(_ rect: CGRect) {
         clearTarget(resetZoom: false)
         scanZoom = zoomFactor
-        setTarget(rect: rect, r: attitude, zoom: zoomFactor, geo: geometry,
-                  subject: "your frame", why: "your shot, hold steady")
+        let t = AimMath.target(from: rect, r: attitude, zoom: zoomFactor, geo: geometry,
+                               landscape: orientation.isLandscape,
+                               subject: "your frame", why: "your shot, hold steady")
+        ideas = [t]
+        ideaIndex = 0
+        activate(t)
     }
 
-    private func setTarget(rect: CGRect, r: simd_double3x3, zoom: Double, geo: CameraGeometry,
-                           subject: String, why: String) {
-        target = AimMath.target(from: rect, r: r, zoom: zoom, geo: geo, subject: subject, why: why)
+    private func setIdeas(_ shots: [ShotIdea], r: simd_double3x3, zoom: Double, geo: CameraGeometry,
+                          orient: ShotOrientation) {
+        ideas = shots.map { shot in
+            let portraitBox = OrientMath.toPortrait(shot.box, from: orient)
+            return AimMath.target(from: OrientMath.flipY(portraitBox), r: r, zoom: zoom, geo: geo,
+                                  landscape: orient.isLandscape, subject: shot.subject, why: shot.why)
+        }
+        ideaIndex = 0
+        if let first = ideas.first { activate(first) }
+    }
+
+    /// Show the next AI idea (if it found more than one).
+    func nextIdea() {
+        guard ideas.count > 1 else { return }
+        ideaIndex = (ideaIndex + 1) % ideas.count
+        if zoomFactor > scanZoom * 1.05 { rampZoom(to: scanZoom, rate: 6) }
+        activate(ideas[ideaIndex])
+    }
+
+    private func activate(_ t: AimTarget) {
+        target = t
         targetZoom = nil
+        resetShootTimer()
         phase = .guiding
+        resetFocus()
         haptic(.light)
         updateGuide(spin: 1)
     }
@@ -429,6 +543,8 @@ final class CameraModel: NSObject, ObservableObject {
     func clearTarget(resetZoom: Bool = true) {
         scanToken += 1
         target = nil
+        ideas = []
+        ideaIndex = 0
         frameRect = nil
         targetZoom = nil
         resetShootTimer()
@@ -441,10 +557,11 @@ final class CameraModel: NSObject, ObservableObject {
         videoQueue.async { self.snapshotHandler = handler }
     }
 
-    /// Upright, ~1024px tall JPEG of the current view for the AI.
-    private func makeJPEG(_ buffer: CVPixelBuffer) -> (data: Data, width: Int, height: Int)? {
-        let upright = CIImage(cvPixelBuffer: buffer).oriented(.right)
-        let scale = 1024.0 / upright.extent.height
+    /// Upright JPEG of the current view for the AI, long side 1024px.
+    private func makeJPEG(_ buffer: CVPixelBuffer, orientation: CGImagePropertyOrientation)
+        -> (data: Data, width: Int, height: Int)? {
+        let upright = CIImage(cvPixelBuffer: buffer).oriented(orientation)
+        let scale = 1024.0 / max(upright.extent.width, upright.extent.height)
         let scaled = upright.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
         guard let cs = CGColorSpace(name: CGColorSpace.sRGB),
               let data = ciContext.jpegRepresentation(
@@ -462,51 +579,82 @@ final class CameraModel: NSObject, ObservableObject {
         isShooting = true
         resetShootTimer()
 
+        let orient = orientation
         var crop: CGRect? = nil
         if target != nil, let r = frameRect {
             let c = r.intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
-            if c.width > 0.2 && c.height > 0.2 { crop = c }
+            if c.width > 0.15 && c.height > 0.15 {
+                crop = OrientMath.fromPortrait(OrientMath.flipY(c), to: orient)
+            }
         }
+        let wantRaw = rawSupported && UserDefaults.standard.bool(forKey: "raw")
+        let flashMode = FlashSetting.current.mode
 
         haptic(.heavy)
         flash = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { self.flash = false }
 
-        let settings = AVCapturePhotoSettings()
-        settings.photoQualityPrioritization = .balanced
-
-        let delegate = PhotoCaptureDelegate { [weak self] data in
-            guard let self = self else { return }
-            self.photoDelegate = nil
-            guard let data = data, let image = UIImage(data: data) else {
-                self.isShooting = false
-                self.showToast("Couldn't take the photo")
-                return
-            }
-            DispatchQueue.global(qos: .userInitiated).async {
-                let upright = image.normalizedUp()
-                let final = crop.map { upright.cropped(toVisionRect: $0) } ?? upright
-                let thumb = final.preparingThumbnail(of: CGSize(width: 240, height: 300)) ?? final
-                DispatchQueue.main.async {
-                    UIImageWriteToSavedPhotosAlbum(final, nil, nil, nil)
-                    self.lastPhoto = thumb
-                    self.isShooting = false
-                    self.showToast("Saved to Photos")
-                    if self.target != nil { self.clearTarget(resetZoom: true) }
-                }
-            }
-        }
-        photoDelegate = delegate
-
         sessionQueue.async {
+            let settings = self.makeSettings(raw: wantRaw, flash: flashMode)
             if let conn = self.photoOutput.connection(with: .video) {
                 if #available(iOS 17.0, *) {
-                    if conn.isVideoRotationAngleSupported(90) { conn.videoRotationAngle = 90 }
+                    if conn.isVideoRotationAngleSupported(orient.rotationAngle) {
+                        conn.videoRotationAngle = orient.rotationAngle
+                    }
                 } else {
-                    if conn.isVideoOrientationSupported { conn.videoOrientation = .portrait }
+                    if conn.isVideoOrientationSupported { conn.videoOrientation = orient.legacyVideoOrientation }
                 }
             }
+            let delegate = PhotoCaptureDelegate { [weak self] result in
+                self?.finishCapture(result, crop: crop)
+            }
+            self.photoDelegate = delegate
             self.photoOutput.capturePhoto(with: settings, delegate: delegate)
+        }
+    }
+
+    /// Runs on sessionQueue.
+    private func makeSettings(raw: Bool, flash: AVCaptureDevice.FlashMode) -> AVCapturePhotoSettings {
+        let codec: AVVideoCodecType = photoOutput.availablePhotoCodecTypes.contains(.hevc) ? .hevc : .jpeg
+        let processed: [String: Any] = [AVVideoCodecKey: codec]
+        let settings: AVCapturePhotoSettings
+        if raw, let fmt = rawFormat {
+            settings = AVCapturePhotoSettings(rawPixelFormatType: fmt, processedFormat: processed)
+        } else {
+            settings = AVCapturePhotoSettings(format: processed)
+            settings.photoQualityPrioritization = .balanced
+        }
+        if photoOutput.supportedFlashModes.contains(flash) {
+            settings.flashMode = flash
+        }
+        return settings
+    }
+
+    /// Runs on main.
+    private func finishCapture(_ result: CaptureResult, crop: CGRect?) {
+        sessionQueue.async { self.photoDelegate = nil }
+        guard let data = result.processed, let image = UIImage(data: data) else {
+            isShooting = false
+            showToast("Couldn't take the photo")
+            return
+        }
+        let metadata = result.metadata
+        let raw = result.raw
+        DispatchQueue.global(qos: .userInitiated).async {
+            let upright = image.normalizedUp()
+            let final = crop.map { upright.cropped(toTopLeftRect: $0) } ?? upright
+            let thumb = final.preparingThumbnail(of: CGSize(width: 240, height: 240)) ?? final
+            let encoded = final.cgImage.flatMap { PhotoSaver.encode($0, metadata: metadata) } ?? data
+            PhotoSaver.save(photo: encoded, raw: raw) { ok in
+                self.lastPhoto = thumb
+                self.isShooting = false
+                if ok {
+                    self.showToast(raw != nil ? "Saved photo + RAW" : "Saved to Photos")
+                } else {
+                    self.showToast("Allow Photos access in Settings to save")
+                }
+                if self.target != nil { self.clearTarget(resetZoom: true) }
+            }
         }
     }
 
@@ -529,18 +677,38 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
     }
 }
 
-final class PhotoCaptureDelegate: NSObject, AVCapturePhotoCaptureDelegate {
-    private let completion: (Data?) -> Void
+struct CaptureResult {
+    var processed: Data?
+    var metadata: [String: Any] = [:]
+    var raw: Data?
+}
 
-    init(completion: @escaping (Data?) -> Void) {
+/// Collects the processed photo (and the RAW one, if asked for), then reports once.
+final class PhotoCaptureDelegate: NSObject, AVCapturePhotoCaptureDelegate {
+    private var result = CaptureResult()
+    private let completion: (CaptureResult) -> Void
+
+    init(completion: @escaping (CaptureResult) -> Void) {
         self.completion = completion
     }
 
     func photoOutput(_ output: AVCapturePhotoOutput,
                      didFinishProcessingPhoto photo: AVCapturePhoto,
                      error: Error?) {
-        let data = error == nil ? photo.fileDataRepresentation() : nil
-        DispatchQueue.main.async { self.completion(data) }
+        guard error == nil, let data = photo.fileDataRepresentation() else { return }
+        if photo.isRawPhoto {
+            result.raw = data
+        } else {
+            result.processed = data
+            result.metadata = photo.metadata
+        }
+    }
+
+    func photoOutput(_ output: AVCapturePhotoOutput,
+                     didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings,
+                     error: Error?) {
+        let r = result
+        DispatchQueue.main.async { self.completion(r) }
     }
 }
 
@@ -554,12 +722,12 @@ extension UIImage {
         return renderer.image { _ in draw(in: CGRect(origin: .zero, size: size)) }
     }
 
-    /// Crops to a normalized Vision rect (origin bottom-left). Expects an upright image.
-    func cropped(toVisionRect r: CGRect) -> UIImage {
+    /// Crops to a normalized rect (origin top-left). Expects an upright image.
+    func cropped(toTopLeftRect r: CGRect) -> UIImage {
         guard let cg = cgImage else { return self }
         let w = CGFloat(cg.width)
         let h = CGFloat(cg.height)
-        let rect = CGRect(x: r.minX * w, y: (1 - r.maxY) * h, width: r.width * w, height: r.height * h)
+        let rect = CGRect(x: r.minX * w, y: r.minY * h, width: r.width * w, height: r.height * h)
             .integral
             .intersection(CGRect(x: 0, y: 0, width: w, height: h))
         guard !rect.isEmpty, let cropped = cg.cropping(to: rect) else { return self }

@@ -2,13 +2,12 @@ import Vision
 import CoreGraphics
 import CoreVideo
 
-/// Picks a "best shot" frame from a camera image.
-/// All rects are normalized (0...1) in Vision coordinates: origin bottom-left, image upright.
+/// Basic on-device "best shot" guess, used when there's no API key.
 enum Composer {
-    /// Shape of the final photo (width / height). 4:5 = Instagram portrait.
-    static let photoAspect: CGFloat = 4.0 / 5.0
-
-    static func bestFrame(in pixelBuffer: CVPixelBuffer, orientation: CGImagePropertyOrientation) -> CGRect {
+    /// Returns a frame (normalized, origin top-left) in the upright image.
+    /// `wOverH` is the photo's width / height in pixels.
+    static func bestFrame(in pixelBuffer: CVPixelBuffer, orientation: CGImagePropertyOrientation,
+                          wOverH: CGFloat) -> CGRect {
         let bw = CGFloat(CVPixelBufferGetWidth(pixelBuffer))
         let bh = CGFloat(CVPixelBufferGetHeight(pixelBuffer))
         let sideways: [CGImagePropertyOrientation] = [.left, .right, .leftMirrored, .rightMirrored]
@@ -16,7 +15,6 @@ enum Composer {
         let imgW = rotated ? bh : bw
         let imgH = rotated ? bw : bh
 
-        // On-device "what would a person look at" map. Free, offline.
         let request = VNGenerateAttentionBasedSaliencyImageRequest()
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: orientation, options: [:])
         try? handler.perform([request])
@@ -33,35 +31,30 @@ enum Composer {
             }
             subject = box
         }
-        return frame(around: subject, imageAspect: imgW / imgH)
+        let vision = frame(around: subject, imageAspect: imgW / imgH, photoAspect: wOverH)
+        return CGRect(x: vision.minX, y: 1 - vision.maxY, width: vision.width, height: vision.height)
     }
 
-    /// Builds a 4:5 frame around the subject using the rule of thirds.
-    static func frame(around s: CGRect, imageAspect: CGFloat) -> CGRect {
-        // Normalized width/height ratio that gives photoAspect in real pixels.
+    /// Builds a frame around the subject using the rule of thirds (Vision coords in and out).
+    static func frame(around s: CGRect, imageAspect: CGFloat, photoAspect: CGFloat) -> CGRect {
         let k = photoAspect / imageAspect
 
-        // Subject fills roughly 60% of the frame.
         var fh = max(s.height / 0.6, (s.width / 0.6) / k)
         fh = min(max(fh, 0.4), 1.0)
         var fw = fh * k
         if fw > 1 { fw = 1; fh = fw / k }
 
-        // Horizontal: put the subject on a third line, unless it's already centred.
         let off = s.midX - 0.5
         var cx: CGFloat
         if abs(off) < 0.08 {
             cx = s.midX
         } else if off < 0 {
-            cx = s.midX + fw / 6   // subject lands on the left third
+            cx = s.midX + fw / 6
         } else {
-            cx = s.midX - fw / 6   // subject lands on the right third
+            cx = s.midX - fw / 6
         }
-
-        // Vertical: subject a bit above centre (Vision y goes up).
         var cy = s.midY - fh * 0.08
 
-        // Keep the frame inside the image.
         cx = min(max(cx, fw / 2), 1 - fw / 2)
         cy = min(max(cy, fh / 2), 1 - fh / 2)
         return CGRect(x: cx - fw / 2, y: cy - fh / 2, width: fw, height: fh)

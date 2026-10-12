@@ -1,12 +1,92 @@
+import AVFoundation
 import CoreMotion
 import CoreGraphics
 import simd
+
+/// How the phone is being held.
+enum ShotOrientation: Equatable {
+    case portrait
+    case landscapeTopLeft    // turned left (counter-clockwise)
+    case landscapeTopRight   // turned right (clockwise)
+
+    var isLandscape: Bool { self != .portrait }
+
+    /// Turns a raw back-camera frame upright for this way of holding the phone.
+    var bufferOrientation: CGImagePropertyOrientation {
+        switch self {
+        case .portrait: return .right
+        case .landscapeTopLeft: return .up
+        case .landscapeTopRight: return .down
+        }
+    }
+
+    /// Photo connection rotation (iOS 17+).
+    var rotationAngle: CGFloat {
+        switch self {
+        case .portrait: return 90
+        case .landscapeTopLeft: return 0
+        case .landscapeTopRight: return 180
+        }
+    }
+
+    /// Photo connection orientation (iOS 16).
+    var legacyVideoOrientation: AVCaptureVideoOrientation {
+        switch self {
+        case .portrait: return .portrait
+        case .landscapeTopLeft: return .landscapeRight
+        case .landscapeTopRight: return .landscapeLeft
+        }
+    }
+
+    /// Rotation for on-screen icons so they read upright.
+    var iconDegrees: Double {
+        switch self {
+        case .portrait: return 0
+        case .landscapeTopLeft: return 90
+        case .landscapeTopRight: return -90
+        }
+    }
+}
+
+/// Converts rects between the portrait preview and an image held another way.
+/// All rects here are normalized with origin top-left.
+enum OrientMath {
+    /// Rect in an upright image taken in `o` -> rect in the portrait preview.
+    static func toPortrait(_ r: CGRect, from o: ShotOrientation) -> CGRect {
+        switch o {
+        case .portrait:
+            return r
+        case .landscapeTopRight:
+            return CGRect(x: r.minY, y: 1 - r.maxX, width: r.height, height: r.width)
+        case .landscapeTopLeft:
+            return CGRect(x: 1 - r.maxY, y: r.minX, width: r.height, height: r.width)
+        }
+    }
+
+    /// Rect in the portrait preview -> rect in an upright image taken in `o`.
+    static func fromPortrait(_ r: CGRect, to o: ShotOrientation) -> CGRect {
+        switch o {
+        case .portrait:
+            return r
+        case .landscapeTopRight:
+            return CGRect(x: 1 - r.maxY, y: r.minX, width: r.height, height: r.width)
+        case .landscapeTopLeft:
+            return CGRect(x: r.minY, y: 1 - r.maxX, width: r.height, height: r.width)
+        }
+    }
+
+    /// Flips between origin top-left and Vision's origin bottom-left (works both ways).
+    static func flipY(_ r: CGRect) -> CGRect {
+        CGRect(x: r.minX, y: 1 - r.maxY, width: r.width, height: r.height)
+    }
+}
 
 /// A shot pinned to a direction in the room, so it stays put while the phone moves.
 struct AimTarget: Equatable {
     var worldDir: SIMD3<Double>   // unit ray in the motion reference frame
     var tanWidth: Double          // frame size on an image plane 1 unit in front of the camera
     var tanHeight: Double
+    var landscape: Bool           // how the phone was held when this frame was picked
     var subject: String
     var why: String
 }
@@ -56,9 +136,9 @@ enum AimMath {
         refToDevice ? r * w : r.transpose * w
     }
 
-    /// A normalized Vision rect (origin bottom-left) seen at attitude `r` and `zoom` -> a target in the room.
+    /// A Vision rect in the portrait preview, seen at attitude `r` and `zoom` -> a target in the room.
     static func target(from rect: CGRect, r: simd_double3x3, zoom: Double, geo: CameraGeometry,
-                       subject: String, why: String) -> AimTarget {
+                       landscape: Bool, subject: String, why: String) -> AimTarget {
         let hw = geo.halfW(zoom: zoom)
         let hh = geo.halfH(zoom: zoom)
         let x = (Double(rect.midX) - 0.5) * 2 * hw
@@ -68,12 +148,15 @@ enum AimMath {
         return AimTarget(worldDir: toWorld(dev, r),
                          tanWidth: Double(rect.width) * 2 * hw,
                          tanHeight: Double(rect.height) * 2 * hh,
+                         landscape: landscape,
                          subject: subject,
                          why: why)
     }
 
-    /// Where the target sits in the view right now (normalized Vision rect). nil if it's behind you.
-    static func project(_ t: AimTarget, r: simd_double3x3, zoom: Double, geo: CameraGeometry) -> CGRect? {
+    /// Where the target sits in the portrait preview now (Vision rect). nil if it's behind you.
+    /// If the phone has been turned since the frame was picked, the box turns with it.
+    static func project(_ t: AimTarget, r: simd_double3x3, zoom: Double, geo: CameraGeometry,
+                        landscapeNow: Bool) -> CGRect? {
         let v = toDevice(t.worldDir, r)
         guard v.z < -0.05 else { return nil }
         let px = v.x / -v.z
@@ -82,13 +165,11 @@ enum AimMath {
         let hh = geo.halfH(zoom: zoom)
         let u = 0.5 + px / (2 * hw)
         let w = 0.5 + py / (2 * hh)
-        let bw = t.tanWidth / (2 * hw)
-        let bh = t.tanHeight / (2 * hh)
+        let swap = t.landscape != landscapeNow
+        let tw = swap ? t.tanHeight : t.tanWidth
+        let th = swap ? t.tanWidth : t.tanHeight
+        let bw = tw / (2 * hw)
+        let bh = th / (2 * hh)
         return CGRect(x: u - bw / 2, y: w - bh / 2, width: bw, height: bh)
-    }
-
-    /// Zoom factor that makes the frame fill about 92% of the view.
-    static func fillZoom(for t: AimTarget, geo: CameraGeometry) -> Double {
-        0.92 * min(2 * geo.tanHalfW / t.tanWidth, 2 * geo.tanHalfH / t.tanHeight)
     }
 }

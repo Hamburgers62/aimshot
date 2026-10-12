@@ -1,5 +1,79 @@
 import SwiftUI
 import Security
+import AVFoundation
+
+/// Photo shape. Flips automatically when the phone is held sideways (4:5 -> 5:4).
+enum ShotAspect: String, CaseIterable, Identifiable {
+    case fourFive = "4:5"
+    case square = "1:1"
+    case threeFour = "3:4"
+    case nineSixteen = "9:16"
+
+    var id: String { rawValue }
+
+    /// Short side / long side.
+    var shortOverLong: Double {
+        switch self {
+        case .fourFive: return 0.8
+        case .square: return 1.0
+        case .threeFour: return 0.75
+        case .nineSixteen: return 0.5625
+        }
+    }
+
+    func label(landscape: Bool) -> String {
+        guard landscape else { return rawValue }
+        let parts = rawValue.split(separator: ":")
+        return parts.count == 2 ? "\(parts[1]):\(parts[0])" : rawValue
+    }
+
+    /// Photo width / height.
+    func wOverH(landscape: Bool) -> Double {
+        landscape ? 1 / shortOverLong : shortOverLong
+    }
+
+    var next: ShotAspect {
+        let all = Self.allCases
+        let i = all.firstIndex(of: self) ?? 0
+        return all[(i + 1) % all.count]
+    }
+
+    static var current: ShotAspect {
+        ShotAspect(rawValue: UserDefaults.standard.string(forKey: "aspect") ?? "") ?? .fourFive
+    }
+}
+
+enum FlashSetting: String, CaseIterable {
+    case off, auto, on
+
+    var next: FlashSetting {
+        switch self {
+        case .off: return .auto
+        case .auto: return .on
+        case .on: return .off
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .off: return "bolt.slash"
+        case .auto: return "bolt.badge.a"
+        case .on: return "bolt.fill"
+        }
+    }
+
+    var mode: AVCaptureDevice.FlashMode {
+        switch self {
+        case .off: return .off
+        case .auto: return .auto
+        case .on: return .on
+        }
+    }
+
+    static var current: FlashSetting {
+        FlashSetting(rawValue: UserDefaults.standard.string(forKey: "flash") ?? "") ?? .off
+    }
+}
 
 enum AIModel: String, CaseIterable, Identifiable {
     case sonnet = "claude-sonnet-5-5"
