@@ -1,4 +1,5 @@
 import CoreImage
+import simd
 import CoreImage.CIFilterBuiltins
 import ImageIO
 import UIKit
@@ -62,16 +63,26 @@ struct EditSettings: Codable, Equatable {
     }
 }
 
+/// How a look treats colour and tone. Baked into a 3D colour table (LUT), like pro film presets.
+struct LookRecipe: Equatable {
+    var contrast: Double = 0          // film S-curve strength (0 = none, ~3 gentle, ~8 hard)
+    var lift: Double = 0              // lifted blacks (matte shadows)
+    var shoulder: Double = 0          // rolled-off highlights (softer whites)
+    var saturation: Double = 1
+    var highlightDesat: Double = 0.3  // colours calm down in bright areas, like film
+    var shadowDesat: Double = 0.2     // ...and in dark areas
+    var shadowTint = SIMD3<Double>(0, 0, 0)
+    var highlightTint = SIMD3<Double>(0, 0, 0)
+    var greenShift: Double = 0        // greens toward olive
+    var blueShift: Double = 0         // blues toward teal
+    var mono: SIMD3<Double>? = nil    // black and white channel mix
+}
+
 struct FilmLook: Identifiable, Equatable {
     let id: String
     let name: String
-    let saturation: Double
-    let contrast: Double
-    /// Per-channel curves: out = a0 + a1·x + a2·x² + a3·x³
-    let red: CIVector
-    let green: CIVector
-    let blue: CIVector
-    // Slider starting points for this look.
+    let recipe: LookRecipe
+    // Slider starting points for this look (kept subtle on purpose).
     let warmth: Double
     let fade: Double
     let grain: Double
@@ -84,54 +95,197 @@ struct FilmLook: Identifiable, Equatable {
 enum FilmLab {
     static let context = CIContext()
 
-    private static let flat = CIVector(x: 0, y: 1, z: 0, w: 0)
-
     static let looks: [FilmLook] = [
-        FilmLook(id: "none", name: "Original", saturation: 1, contrast: 1,
-                 red: flat, green: flat, blue: flat,
+        FilmLook(id: "none", name: "Original", recipe: LookRecipe(),
                  warmth: 0, fade: 0, grain: 0, halation: 0, vignette: 0),
-        FilmLook(id: "golden", name: "Golden 200", saturation: 1.03, contrast: 1.04,
-                 red: CIVector(x: 0.03, y: 1.02, z: 0, w: -0.03),
-                 green: CIVector(x: 0.01, y: 1.0, z: 0, w: -0.02),
-                 blue: CIVector(x: 0, y: 0.92, z: 0, w: 0),
-                 warmth: 0.2, fade: 0.08, grain: 0.15, halation: 0.1, vignette: 0.15),
-        FilmLook(id: "soft", name: "Soft 400", saturation: 0.9, contrast: 0.95,
-                 red: CIVector(x: 0.03, y: 0.97, z: 0, w: 0),
-                 green: CIVector(x: 0.02, y: 0.97, z: 0, w: 0),
-                 blue: CIVector(x: 0.03, y: 0.93, z: 0, w: 0),
-                 warmth: 0.12, fade: 0.18, grain: 0.18, halation: 0.05, vignette: 0.08),
-        FilmLook(id: "night", name: "Night 800", saturation: 0.95, contrast: 1.1,
-                 red: CIVector(x: 0, y: 0.95, z: 0.1, w: -0.03),
-                 green: CIVector(x: 0.02, y: 0.98, z: 0, w: 0),
-                 blue: CIVector(x: 0.06, y: 0.9, z: -0.05, w: 0.05),
-                 warmth: 0.08, fade: 0.12, grain: 0.3, halation: 0.4, vignette: 0.25),
-        FilmLook(id: "slide", name: "Slide", saturation: 1.2, contrast: 1.15,
-                 red: flat, green: flat,
-                 blue: CIVector(x: 0.02, y: 1.02, z: 0, w: 0),
-                 warmth: -0.12, fade: 0, grain: 0.1, halation: 0.05, vignette: 0.2),
-        FilmLook(id: "faded", name: "Faded", saturation: 0.8, contrast: 0.9,
-                 red: flat, green: flat, blue: flat,
-                 warmth: 0.05, fade: 0.4, grain: 0.2, halation: 0, vignette: 0.12),
-        FilmLook(id: "ember", name: "Ember", saturation: 0.95, contrast: 1.18,
-                 red: CIVector(x: 0.02, y: 1.0, z: 0.04, w: -0.04),
-                 green: CIVector(x: 0, y: 0.96, z: 0, w: 0),
-                 blue: CIVector(x: 0, y: 0.84, z: 0, w: 0.04),
-                 warmth: 0.18, fade: 0.04, grain: 0.18, halation: 0.25, vignette: 0.45, ev: -0.35),
-        FilmLook(id: "tide", name: "Tide", saturation: 0.82, contrast: 1.12,
-                 red: CIVector(x: 0, y: 0.94, z: 0.04, w: 0),
-                 green: CIVector(x: 0.02, y: 0.97, z: 0, w: 0),
-                 blue: CIVector(x: 0.07, y: 0.95, z: 0, w: -0.02),
-                 warmth: -0.2, fade: 0.1, grain: 0.15, halation: 0, vignette: 0.35, ev: -0.25),
-        FilmLook(id: "mono", name: "Mono", saturation: 0, contrast: 1.2,
-                 red: flat, green: flat, blue: flat,
-                 warmth: 0, fade: 0.1, grain: 0.3, halation: 0, vignette: 0.25),
-        FilmLook(id: "noir", name: "Noir", saturation: 0, contrast: 1.45,
-                 red: flat, green: flat, blue: flat,
-                 warmth: 0, fade: 0, grain: 0.25, halation: 0, vignette: 0.4)
+        FilmLook(id: "natural", name: "Natural",
+                 recipe: LookRecipe(contrast: 2.5, lift: 0.015, shoulder: 0.02, saturation: 1.02,
+                                    highlightDesat: 0.2, shadowDesat: 0.1,
+                                    shadowTint: SIMD3(0, 0.003, 0.008), highlightTint: SIMD3(0.012, 0.006, 0),
+                                    greenShift: 0.2),
+                 warmth: 0.03, fade: 0, grain: 0.05, halation: 0, vignette: 0),
+        FilmLook(id: "golden", name: "Golden 200",
+                 recipe: LookRecipe(contrast: 4, lift: 0.035, shoulder: 0.04, saturation: 1.05,
+                                    highlightDesat: 0.3, shadowDesat: 0.2,
+                                    shadowTint: SIMD3(0.005, 0.005, 0.02), highlightTint: SIMD3(0.04, 0.022, -0.02),
+                                    greenShift: 0.5, blueShift: 0.2),
+                 warmth: 0.1, fade: 0.03, grain: 0.12, halation: 0.05, vignette: 0.05),
+        FilmLook(id: "soft", name: "Soft 400",
+                 recipe: LookRecipe(contrast: 3, lift: 0.05, shoulder: 0.05, saturation: 0.92,
+                                    highlightDesat: 0.35, shadowDesat: 0.25,
+                                    shadowTint: SIMD3(-0.005, 0.01, 0.018), highlightTint: SIMD3(0.03, 0.02, 0.005),
+                                    greenShift: 0.4, blueShift: 0.3),
+                 warmth: 0.05, fade: 0.04, grain: 0.1, halation: 0, vignette: 0),
+        FilmLook(id: "night", name: "Night 800",
+                 recipe: LookRecipe(contrast: 5, lift: 0.03, shoulder: 0.03, saturation: 0.95,
+                                    highlightDesat: 0.35, shadowDesat: 0.3,
+                                    shadowTint: SIMD3(-0.015, 0.012, 0.035), highlightTint: SIMD3(0.04, 0.015, -0.02),
+                                    greenShift: 0.3, blueShift: 0.6),
+                 warmth: 0, fade: 0.02, grain: 0.15, halation: 0.18, vignette: 0.06),
+        FilmLook(id: "ember", name: "Ember",
+                 recipe: LookRecipe(contrast: 5.5, lift: 0.02, shoulder: 0.07, saturation: 0.9,
+                                    highlightDesat: 0.4, shadowDesat: 0.35,
+                                    shadowTint: SIMD3(0.018, 0.0, -0.008), highlightTint: SIMD3(0.05, 0.02, -0.03),
+                                    greenShift: 0.6, blueShift: 0.3),
+                 warmth: 0.06, fade: 0, grain: 0.12, halation: 0.1, vignette: 0.12, ev: -0.3),
+        FilmLook(id: "tide", name: "Tide",
+                 recipe: LookRecipe(contrast: 4.5, lift: 0.045, shoulder: 0.04, saturation: 0.82,
+                                    highlightDesat: 0.35, shadowDesat: 0.3,
+                                    shadowTint: SIMD3(-0.012, 0.01, 0.035), highlightTint: SIMD3(0.005, 0.01, 0.012),
+                                    greenShift: 0.3, blueShift: 0.7),
+                 warmth: -0.06, fade: 0.03, grain: 0.1, halation: 0, vignette: 0.08, ev: -0.2),
+        FilmLook(id: "slide", name: "Slide",
+                 recipe: LookRecipe(contrast: 6, lift: 0, shoulder: 0.015, saturation: 1.15,
+                                    highlightDesat: 0.15, shadowDesat: 0.1,
+                                    shadowTint: SIMD3(0, 0, 0.015), highlightTint: SIMD3(0.01, 0.005, 0),
+                                    greenShift: 0.1, blueShift: 0.2),
+                 warmth: -0.03, fade: 0, grain: 0.06, halation: 0, vignette: 0.04),
+        FilmLook(id: "faded", name: "Faded",
+                 recipe: LookRecipe(contrast: 2.5, lift: 0.11, shoulder: 0.07, saturation: 0.82,
+                                    highlightDesat: 0.3, shadowDesat: 0.3,
+                                    shadowTint: SIMD3(0, 0.008, 0.02), highlightTint: SIMD3(0.02, 0.015, 0.0),
+                                    greenShift: 0.4, blueShift: 0.4),
+                 warmth: 0.03, fade: 0, grain: 0.1, halation: 0, vignette: 0),
+        FilmLook(id: "mono", name: "Mono",
+                 recipe: LookRecipe(contrast: 4.5, lift: 0.03, shoulder: 0.03,
+                                    shadowTint: SIMD3(0, 0, 0.006), highlightTint: SIMD3(0.008, 0.004, 0),
+                                    mono: SIMD3(0.32, 0.52, 0.16)),
+                 warmth: 0, fade: 0.03, grain: 0.15, halation: 0, vignette: 0.04),
+        FilmLook(id: "noir", name: "Noir",
+                 recipe: LookRecipe(contrast: 8, lift: 0, shoulder: 0.01,
+                                    mono: SIMD3(0.5, 0.4, 0.1)),
+                 warmth: 0, fade: 0, grain: 0.12, halation: 0, vignette: 0.1)
     ]
 
     static func look(_ id: String) -> FilmLook {
         looks.first { $0.id == id } ?? looks[0]
+    }
+
+    // MARK: Colour tables
+
+    private static let lutSize = 33
+    private static var lutCache: [String: Data] = [:]
+    private static let lutLock = NSLock()
+
+    /// The look's 3D colour table, built once and cached.
+    static func lut(for look: FilmLook) -> Data {
+        lutLock.lock()
+        defer { lutLock.unlock() }
+        if let d = lutCache[look.id] { return d }
+        let n = lutSize
+        var cube = [Float](repeating: 0, count: n * n * n * 4)
+        var i = 0
+        for b in 0..<n {
+            for g in 0..<n {
+                for r in 0..<n {
+                    let rgb = SIMD3(Double(r), Double(g), Double(b)) / Double(n - 1)
+                    let o = grade(rgb, look.recipe)
+                    cube[i] = Float(o.x)
+                    cube[i + 1] = Float(o.y)
+                    cube[i + 2] = Float(o.z)
+                    cube[i + 3] = 1
+                    i += 4
+                }
+            }
+        }
+        let data = cube.withUnsafeBufferPointer { Data(buffer: $0) }
+        lutCache[look.id] = data
+        return data
+    }
+
+    /// One colour through the look (values 0...1, display gamma).
+    static func grade(_ input: SIMD3<Double>, _ p: LookRecipe) -> SIMD3<Double> {
+        var c = input
+
+        // Hue moves: greens toward olive, blues toward teal (protects skin tones).
+        if p.greenShift != 0 || p.blueShift != 0 {
+            var (h, s, v) = rgbToHSV(c)
+            let greenW = bump(h, centre: 0.33, width: 0.12) * p.greenShift
+            let blueW = bump(h, centre: 0.62, width: 0.1) * p.blueShift
+            h += (0.2 - h) * 0.35 * greenW
+            s *= 1 - 0.2 * greenW
+            h += (0.53 - h) * 0.4 * blueW
+            c = hsvToRGB(h, s, v)
+        }
+
+        if let m = p.mono {
+            let y = simd_dot(c, m)
+            c = SIMD3(repeating: y)
+        }
+
+        // Film tone curve.
+        c = SIMD3(curve(c.x, p), curve(c.y, p), curve(c.z, p))
+
+        // Colour calms down in highlights and shadows.
+        let y = 0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z
+        let hi = smoothstep(0.65, 1.0, y)
+        let lo = 1 - smoothstep(0.0, 0.3, y)
+        let sat = p.saturation * (1 - p.highlightDesat * hi) * (1 - p.shadowDesat * lo)
+        let grey = SIMD3(repeating: y)
+        c = grey + (c - grey) * sat
+
+        // Split toning.
+        c += p.shadowTint * (1 - y) * (1 - y) + p.highlightTint * y * y
+
+        return simd_clamp(c, SIMD3(repeating: 0), SIMD3(repeating: 1))
+    }
+
+    private static func curve(_ x: Double, _ p: LookRecipe) -> Double {
+        var s = x
+        if p.contrast > 0.01 {
+            let k = p.contrast
+            func sig(_ v: Double) -> Double { 1 / (1 + exp(-k * v)) }
+            let lo = sig(-0.5)
+            let hi = sig(0.5)
+            s = (sig(x - 0.5) - lo) / (hi - lo)
+        }
+        return p.lift + (1 - p.lift - p.shoulder) * s
+    }
+
+    private static func smoothstep(_ a: Double, _ b: Double, _ x: Double) -> Double {
+        let t = min(max((x - a) / (b - a), 0), 1)
+        return t * t * (3 - 2 * t)
+    }
+
+    /// 1 at the centre hue, fading to 0 at +/- width (hue wraps around).
+    private static func bump(_ h: Double, centre: Double, width: Double) -> Double {
+        var d = abs(h - centre)
+        if d > 0.5 { d = 1 - d }
+        return max(0, 1 - d / width)
+    }
+
+    private static func rgbToHSV(_ c: SIMD3<Double>) -> (Double, Double, Double) {
+        let mx = max(c.x, c.y, c.z)
+        let mn = min(c.x, c.y, c.z)
+        let d = mx - mn
+        var h = 0.0
+        if d > 1e-6 {
+            if mx == c.x { h = ((c.y - c.z) / d).truncatingRemainder(dividingBy: 6) }
+            else if mx == c.y { h = (c.z - c.x) / d + 2 }
+            else { h = (c.x - c.y) / d + 4 }
+            h /= 6
+            if h < 0 { h += 1 }
+        }
+        let s = mx > 1e-6 ? d / mx : 0
+        return (h, s, mx)
+    }
+
+    private static func hsvToRGB(_ hIn: Double, _ s: Double, _ v: Double) -> SIMD3<Double> {
+        var h = hIn.truncatingRemainder(dividingBy: 1)
+        if h < 0 { h += 1 }
+        let i = floor(h * 6)
+        let f = h * 6 - i
+        let p = v * (1 - s)
+        let q = v * (1 - f * s)
+        let t = v * (1 - (1 - f) * s)
+        switch Int(i) % 6 {
+        case 0: return SIMD3(v, t, p)
+        case 1: return SIMD3(q, v, p)
+        case 2: return SIMD3(p, v, t)
+        case 3: return SIMD3(p, q, v)
+        case 4: return SIMD3(t, p, v)
+        default: return SIMD3(v, p, q)
+        }
     }
 
     // MARK: Render
@@ -143,37 +297,14 @@ enum FilmLab {
         let look = look(s.look)
         let k = s.intensity
 
-        if s.exposure != 0 {
+        if s.exposure != 0 || look.ev != 0 {
             let f = CIFilter.exposureAdjust()
             f.inputImage = img
-            f.ev = Float(s.exposure)
+            f.ev = Float(s.exposure + look.ev * k)
             img = f.outputImage ?? img
         }
 
-        if look.ev != 0 {
-            let f = CIFilter.exposureAdjust()
-            f.inputImage = img
-            f.ev = Float(look.ev * k)
-            img = f.outputImage ?? img
-        }
-
-        if look.id != "none" {
-            let cc = CIFilter.colorControls()
-            cc.inputImage = img
-            cc.saturation = Float(lerp(1, look.saturation, k))
-            cc.contrast = Float(lerp(1, look.contrast, k))
-            cc.brightness = 0
-            img = cc.outputImage ?? img
-
-            let p = CIFilter.colorPolynomial()
-            p.inputImage = img
-            p.redCoefficients = mix(look.red, k)
-            p.greenCoefficients = mix(look.green, k)
-            p.blueCoefficients = mix(look.blue, k)
-            p.alphaCoefficients = flat
-            img = p.outputImage ?? img
-        }
-
+        // White balance goes before the look, like on a real camera.
         if s.warmth != 0 {
             let w = CGFloat(s.warmth) * 0.12
             let m = CIFilter.colorMatrix()
@@ -184,6 +315,25 @@ enum FilmLab {
             m.aVector = CIVector(x: 0, y: 0, z: 0, w: 1)
             m.biasVector = CIVector(x: 0, y: 0, z: 0, w: 0)
             img = m.outputImage ?? img
+        }
+
+        if look.id != "none", k > 0.001 {
+            let cube = CIFilter.colorCubeWithColorSpace()
+            cube.inputImage = img
+            cube.cubeDimension = Float(lutSize)
+            cube.cubeData = lut(for: look)
+            cube.colorSpace = CGColorSpace(name: CGColorSpace.sRGB)
+            if let graded = cube.outputImage {
+                if k >= 0.999 {
+                    img = graded
+                } else {
+                    let mix = CIFilter.dissolveTransition()
+                    mix.inputImage = img
+                    mix.targetImage = graded
+                    mix.time = Float(k)
+                    img = mix.outputImage ?? graded
+                }
+            }
         }
 
         if s.fade > 0 {
@@ -241,7 +391,7 @@ enum FilmLab {
         lum.gVector = weights
         lum.bVector = weights
         lum.aVector = CIVector(x: 0, y: 0, z: 0, w: 1)
-        lum.biasVector = CIVector(x: -0.7, y: -0.7, z: -0.7, w: 0)
+        lum.biasVector = CIVector(x: -0.8, y: -0.8, z: -0.8, w: 0)
 
         let clamp = CIFilter.colorClamp()
         clamp.inputImage = lum.outputImage
@@ -251,15 +401,15 @@ enum FilmLab {
         let a = CGFloat(amount) * 0.55
         let tint = CIFilter.colorMatrix()
         tint.inputImage = clamp.outputImage
-        tint.rVector = CIVector(x: 3.2 * a, y: 0, z: 0, w: 0)
-        tint.gVector = CIVector(x: 1.0 * a, y: 0, z: 0, w: 0)
-        tint.bVector = CIVector(x: 0.35 * a, y: 0, z: 0, w: 0)
+        tint.rVector = CIVector(x: 4.5 * a, y: 0, z: 0, w: 0)
+        tint.gVector = CIVector(x: 1.4 * a, y: 0, z: 0, w: 0)
+        tint.bVector = CIVector(x: 0.5 * a, y: 0, z: 0, w: 0)
         tint.aVector = CIVector(x: 0, y: 0, z: 0, w: 0)
         tint.biasVector = CIVector(x: 0, y: 0, z: 0, w: 0)
         guard let tinted = tint.outputImage else { return img }
 
         let glow = tinted.clampedToExtent()
-            .applyingGaussianBlur(sigma: Double(size) * 0.01)
+            .applyingGaussianBlur(sigma: Double(size) * 0.007)
             .cropped(to: extent)
         let add = CIFilter.additionCompositing()
         add.inputImage = glow
