@@ -178,7 +178,8 @@ enum FilmLab {
         for b in 0..<n {
             for g in 0..<n {
                 for r in 0..<n {
-                    let rgb = SIMD3(Double(r), Double(g), Double(b)) / Double(n - 1)
+                    let step = 1.0 / Double(n - 1)
+                    let rgb = SIMD3<Double>(Double(r) * step, Double(g) * step, Double(b) * step)
                     let o = grade(rgb, look.recipe)
                     cube[i] = Float(o.x)
                     cube[i + 1] = Float(o.y)
@@ -217,17 +218,25 @@ enum FilmLab {
         c = SIMD3(curve(c.x, p), curve(c.y, p), curve(c.z, p))
 
         // Colour calms down in highlights and shadows.
-        let y = 0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z
+        let y: Double = simd_dot(c, SIMD3<Double>(0.2126, 0.7152, 0.0722))
         let hi = smoothstep(0.65, 1.0, y)
         let lo = 1 - smoothstep(0.0, 0.3, y)
         let sat = p.saturation * (1 - p.highlightDesat * hi) * (1 - p.shadowDesat * lo)
-        let grey = SIMD3(repeating: y)
-        c = grey + (c - grey) * sat
+        let grey = SIMD3<Double>(repeating: y)
+        let chroma: SIMD3<Double> = (c - grey) * sat
+        c = grey + chroma
 
         // Split toning.
-        c += p.shadowTint * (1 - y) * (1 - y) + p.highlightTint * y * y
+        let shadowWeight: Double = (1 - y) * (1 - y)
+        let highlightWeight: Double = y * y
+        let shadowPart: SIMD3<Double> = p.shadowTint * shadowWeight
+        let highlightPart: SIMD3<Double> = p.highlightTint * highlightWeight
+        c += shadowPart
+        c += highlightPart
 
-        return simd_clamp(c, SIMD3(repeating: 0), SIMD3(repeating: 1))
+        let zero = SIMD3<Double>(repeating: 0)
+        let one = SIMD3<Double>(repeating: 1)
+        return simd_clamp(c, zero, one)
     }
 
     private static func curve(_ x: Double, _ p: LookRecipe) -> Double {
