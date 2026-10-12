@@ -257,6 +257,7 @@ struct SettingsView: View {
     @AppStorage("autoShoot") private var autoShoot: Bool = true
     @AppStorage("autoScan") private var autoScan: Bool = false
     @AppStorage("aiEditNew") private var aiEditNew: Bool = false
+    @AppStorage("refine") private var refine: Bool = true
     @AppStorage("startLens") private var startLens: String = "wide"
     @AppStorage("showGrid") private var showGrid: Bool = true
     @AppStorage("showLevel") private var showLevel: Bool = true
@@ -376,13 +377,14 @@ struct SettingsView: View {
 
                 // Automation
                 Section {
+                    Toggle("Fine-tune framing up close", isOn: $refine)
                     Toggle("Auto-shoot when lined up", isOn: $autoShoot)
                     Toggle("Auto-scan when you hold still", isOn: $autoScan)
                     Toggle("AI-edit every new shot", isOn: $aiEditNew)
                 } header: {
                     Text("Hands-free")
                 } footer: {
-                    Text("Auto-scan looks for a shot each time you point at a new view and hold still. AI edit picks a look for every photo before it's saved. Both use a little AI credit each time.")
+                    Text("Fine-tune takes a second look once zoomed in and tightens the crop. Auto-scan looks for a shot each time you point at a new view and hold still. AI edit picks a look for every photo before it's saved. Each uses a little AI credit.")
                 }
 
                 // Camera

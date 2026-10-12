@@ -68,7 +68,7 @@ enum AIScout {
 
         If it's dark, prefer subjects that are well lit (signs, windows, lamps, lit buildings) and keep crops larger, because zooming far in at night makes photos soft.
 
-        Each photo is a \(aspectLabel) \(shape) crop (width:height = \(aspectLabel)). Frame each around its subject with a little breathing room. Crops can be smaller than the whole view, because the app zooms in.
+        Each photo is a \(aspectLabel) \(shape) crop (width:height = \(aspectLabel)). Frame tight: the subject should fill most of the crop, with only a little breathing room. For people, crop close around the face and hands, not the whole room. Crops can be much smaller than the whole view, because the app zooms in.
 
         exposure is a tweak in stops from -1 to 1: negative for bright lights, signs and screens so they don't blow out, positive for dim subjects, 0 if fine.
 
@@ -114,6 +114,36 @@ enum AIScout {
         let good = ideas.filter { $0.score >= 5 }.sorted { $0.score > $1.score }
         if good.isEmpty && raw.isEmpty && tip == nil { throw AIScoutError.unreadable(snippet(text)) }
         return ScanResult(ideas: good, tip: tip)
+    }
+
+    // MARK: Fine-tune the crop up close
+
+    /// Second look, once zoomed in on the subject: returns a tighter, more precise crop
+    /// (normalized, origin top-left, in the image sent).
+    static func refineCrop(jpeg: Data, width: Int, height: Int, key: String, model: String,
+                           subject: String, aspectLabel: String, landscape: Bool, wOverH: Double) async throws -> CGRect {
+        let shape = landscape ? "landscape" : "portrait"
+        let p = """
+        This is a zoomed-in camera view (\(width)x\(height) pixels) of: \(subject).
+
+        Choose the best final \(aspectLabel) \(shape) crop of it, like a skilled photographer would: tight and intentional, the subject filling most of the frame, clean edges (don't cut through hands, heads or key details, and leave distracting objects out), rule of thirds where it helps. For a person, put the face and eyes in the upper third.
+
+        Reply with ONLY this JSON, no markdown, no other text:
+        {"box": [x, y, width, height]}
+
+        box is in pixels of this image, origin top-left.
+        """
+        let text = try await ask(jpeg: jpeg, prompt: p, key: key, model: model, maxTokens: 800)
+        guard let dict = extractJSON(text) as? [String: Any],
+              var b = box(dict["box"] ?? dict["crop"]) else {
+            throw AIScoutError.unreadable(snippet(text))
+        }
+        let fullW = Double(width)
+        let fullH = Double(height)
+        if b.allSatisfy({ $0 <= 1.0 }) {
+            b = [b[0] * fullW, b[1] * fullH, b[2] * fullW, b[3] * fullH]
+        }
+        return frame(box: b, fullW: fullW, fullH: fullH, wOverH: wOverH)
     }
 
     // MARK: Suggest an edit

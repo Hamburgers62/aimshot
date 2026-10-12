@@ -91,6 +91,7 @@ struct AimTarget: Equatable {
     var why: String
     var score: Int = 0            // AI's 1-10 rating (0 = not rated)
     var exposure: Double = 0      // AI's suggested exposure tweak in EV
+    var refined: Bool = false     // already fine-tuned up close
 }
 
 /// Field of view of the upright (portrait) camera view at videoZoomFactor 1.

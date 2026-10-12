@@ -267,12 +267,17 @@ struct EditorView: View {
     @State private var aiBusy = false
     @State private var aiNote: String? = nil
     @State private var message: String? = nil
+    @State private var history: [EditSettings]
+    @State private var historyIndex = 0
+    @State private var restoring = false
+    @State private var commitToken = 0
 
     private let tabs = ["Look", "Adjust", "Frame"]
 
     init(record: ShotRecord) {
         self.record = record
         _settings = State(initialValue: record.edits)
+        _history = State(initialValue: [record.edits])
     }
 
     var body: some View {
@@ -341,25 +346,80 @@ struct EditorView: View {
             renderer.load(url: library.imageURL(record.id), withLookThumbs: true)
             render()
         }
-        .onChange(of: settings) { _ in render() }
+        .onChange(of: settings) { s in
+            render()
+            if restoring {
+                restoring = false
+                return
+            }
+            // Record a history step once you stop fiddling for a moment.
+            commitToken += 1
+            let t = commitToken
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+                if t == commitToken { commit(s) }
+            }
+        }
     }
 
     private func render() {
         renderer.update(settings)
     }
 
+    // MARK: Undo / redo
+
+    private var canUndo: Bool { historyIndex > 0 || settings != history[historyIndex] }
+    private var canRedo: Bool { historyIndex < history.count - 1 }
+
+    private func commit(_ s: EditSettings) {
+        guard history[historyIndex] != s else { return }
+        history = Array(history.prefix(historyIndex + 1)) + [s]
+        historyIndex = history.count - 1
+    }
+
+    private func undo() {
+        commitToken += 1
+        commit(settings)              // keep a change you made a moment ago
+        guard historyIndex > 0 else { return }
+        historyIndex -= 1
+        restore(history[historyIndex])
+    }
+
+    private func redo() {
+        commitToken += 1
+        guard historyIndex < history.count - 1 else { return }
+        historyIndex += 1
+        restore(history[historyIndex])
+    }
+
+    private func restore(_ s: EditSettings) {
+        if s != settings {
+            restoring = true
+            settings = s
+        }
+    }
+
     // MARK: Header + tabs
 
     private var header: some View {
-        HStack {
+        HStack(spacing: 18) {
             Button("Cancel") { dismiss() }
                 .font(Theme.ui(16))
                 .foregroundColor(Theme.paper)
             Spacer()
-            Text(record.subject.capitalized)
-                .font(Theme.title(17))
-                .foregroundColor(Theme.paper)
-                .lineLimit(1)
+            Button {
+                undo()
+            } label: {
+                Image(systemName: "arrow.uturn.backward")
+                    .foregroundColor(canUndo ? Theme.paper : Theme.muted.opacity(0.5))
+            }
+            .disabled(!canUndo)
+            Button {
+                redo()
+            } label: {
+                Image(systemName: "arrow.uturn.forward")
+                    .foregroundColor(canRedo ? Theme.paper : Theme.muted.opacity(0.5))
+            }
+            .disabled(!canRedo)
             Spacer()
             Button("Save") { save() }
                 .font(Theme.ui(16, .semibold))
@@ -577,6 +637,12 @@ struct EditorView: View {
             ZStack(alignment: .top) {
                 Color(red: 0.96, green: 0.945, blue: 0.915)
                 Rectangle().fill(photo).padding(.horizontal, 4).padding(.top, 4).padding(.bottom, 14)
+            }
+        case .film:
+            ZStack {
+                Color(red: 0.97, green: 0.965, blue: 0.95)
+                Rectangle().fill(photo).padding(4)
+                    .mask(RoundedRectangle(cornerRadius: 1.5).padding(4.5))
             }
         case .black:
             ZStack { Color.black; Rectangle().fill(photo).padding(3) }

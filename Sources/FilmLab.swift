@@ -77,6 +77,8 @@ struct FilmLook: Identifiable, Equatable {
     let grain: Double
     let halation: Double
     let vignette: Double
+    /// The look's own brightness shift in stops (moody looks sit darker).
+    var ev: Double = 0
 }
 
 enum FilmLab {
@@ -110,6 +112,16 @@ enum FilmLab {
         FilmLook(id: "faded", name: "Faded", saturation: 0.8, contrast: 0.9,
                  red: flat, green: flat, blue: flat,
                  warmth: 0.05, fade: 0.4, grain: 0.2, halation: 0, vignette: 0.12),
+        FilmLook(id: "ember", name: "Ember", saturation: 0.95, contrast: 1.18,
+                 red: CIVector(x: 0.02, y: 1.0, z: 0.04, w: -0.04),
+                 green: CIVector(x: 0, y: 0.96, z: 0, w: 0),
+                 blue: CIVector(x: 0, y: 0.84, z: 0, w: 0.04),
+                 warmth: 0.18, fade: 0.04, grain: 0.18, halation: 0.25, vignette: 0.45, ev: -0.35),
+        FilmLook(id: "tide", name: "Tide", saturation: 0.82, contrast: 1.12,
+                 red: CIVector(x: 0, y: 0.94, z: 0.04, w: 0),
+                 green: CIVector(x: 0.02, y: 0.97, z: 0, w: 0),
+                 blue: CIVector(x: 0.07, y: 0.95, z: 0, w: -0.02),
+                 warmth: -0.2, fade: 0.1, grain: 0.15, halation: 0, vignette: 0.35, ev: -0.25),
         FilmLook(id: "mono", name: "Mono", saturation: 0, contrast: 1.2,
                  red: flat, green: flat, blue: flat,
                  warmth: 0, fade: 0.1, grain: 0.3, halation: 0, vignette: 0.25),
@@ -135,6 +147,13 @@ enum FilmLab {
             let f = CIFilter.exposureAdjust()
             f.inputImage = img
             f.ev = Float(s.exposure)
+            img = f.outputImage ?? img
+        }
+
+        if look.ev != 0 {
+            let f = CIFilter.exposureAdjust()
+            f.inputImage = img
+            f.ev = Float(look.ev * k)
             img = f.outputImage ?? img
         }
 

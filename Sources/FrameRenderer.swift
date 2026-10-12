@@ -1,7 +1,7 @@
 import UIKit
 
 enum FrameStyle: String, Codable, CaseIterable, Identifiable {
-    case none, white, paper, black, specs
+    case none, white, paper, film, black, specs
 
     var id: String { rawValue }
 
@@ -10,6 +10,7 @@ enum FrameStyle: String, Codable, CaseIterable, Identifiable {
         case .none: return "None"
         case .white: return "White"
         case .paper: return "Paper"
+        case .film: return "Film edge"
         case .black: return "Black"
         case .specs: return "Specs"
         }
@@ -35,6 +36,9 @@ enum FrameRenderer {
         case .paper:
             top = unit * 0.05; side = unit * 0.05; bottom = unit * 0.17
             bg = UIColor(red: 0.96, green: 0.945, blue: 0.915, alpha: 1)
+        case .film:
+            top = unit * 0.045; side = unit * 0.045; bottom = unit * 0.045
+            bg = UIColor(red: 0.97, green: 0.965, blue: 0.95, alpha: 1)
         case .black:
             top = unit * 0.03; side = unit * 0.03; bottom = unit * 0.03
             bg = .black
@@ -52,7 +56,15 @@ enum FrameRenderer {
             ctx.fill(CGRect(origin: .zero, size: size))
 
             let photoRect = CGRect(x: side, y: top, width: w, height: h)
-            UIImage(cgImage: image).draw(in: photoRect)
+            if style == .film {
+                // Rough, slightly uneven edges like a darkroom print.
+                ctx.cgContext.saveGState()
+                roughEdge(around: photoRect, depth: unit * 0.01).addClip()
+                UIImage(cgImage: image).draw(in: photoRect)
+                ctx.cgContext.restoreGState()
+            } else {
+                UIImage(cgImage: image).draw(in: photoRect)
+            }
 
             if dateStamp {
                 drawDateStamp(date, in: photoRect, unit: unit)
@@ -63,6 +75,41 @@ enum FrameRenderer {
             }
         }
         return out.cgImage ?? image
+    }
+
+    /// A rectangle whose edges wander inward a little, the same way every time.
+    private static func roughEdge(around r: CGRect, depth: CGFloat) -> UIBezierPath {
+        var seed: UInt64 = 0x9E3779B97F4A7C15
+        func rand() -> CGFloat {
+            seed = seed &* 6364136223846793005 &+ 1442695040888963407
+            return CGFloat(Double(seed >> 11) / Double(UInt64(1) << 53))
+        }
+        let steps = 140
+        var wander: CGFloat = depth * 0.5
+        func nextInset() -> CGFloat {
+            wander = min(max(wander + (rand() - 0.5) * depth * 0.55, 0), depth)
+            return wander
+        }
+        let path = UIBezierPath()
+        path.move(to: CGPoint(x: r.minX + nextInset(), y: r.minY + nextInset()))
+        for i in 1...steps {      // top
+            let x = r.minX + r.width * CGFloat(i) / CGFloat(steps)
+            path.addLine(to: CGPoint(x: x, y: r.minY + nextInset()))
+        }
+        for i in 1...steps {      // right
+            let y = r.minY + r.height * CGFloat(i) / CGFloat(steps)
+            path.addLine(to: CGPoint(x: r.maxX - nextInset(), y: y))
+        }
+        for i in 1...steps {      // bottom
+            let x = r.maxX - r.width * CGFloat(i) / CGFloat(steps)
+            path.addLine(to: CGPoint(x: x, y: r.maxY - nextInset()))
+        }
+        for i in 1...steps {      // left
+            let y = r.maxY - r.height * CGFloat(i) / CGFloat(steps)
+            path.addLine(to: CGPoint(x: r.minX + nextInset(), y: y))
+        }
+        path.close()
+        return path
     }
 
     private static func drawDateStamp(_ date: Date, in rect: CGRect, unit: CGFloat) {

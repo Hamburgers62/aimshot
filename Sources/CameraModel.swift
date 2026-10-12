@@ -10,6 +10,7 @@ enum Phase: Equatable {
     case scanning   // waiting for the AI
     case guiding    // target set, aim at it
     case zooming    // centred, zooming in to fill the frame
+    case refining   // zoomed in; AI is tightening the crop
     case ready      // framed up, shoot
 }
 
@@ -464,9 +465,14 @@ final class CameraModel: NSObject, ObservableObject {
                 targetZoom = nil
                 stopZoomRamp()
             } else if let tz = targetZoom, abs(zoomFactor - tz) < 0.03 * tz {
-                phase = .ready
-                focusOnFrame()
-                haptic(.medium)
+                let refineOn = UserDefaults.standard.object(forKey: "refine") as? Bool ?? true
+                if refineOn && !t.refined && !AIConfig.key.isEmpty {
+                    refine(t)
+                } else {
+                    phase = .ready
+                    focusOnFrame()
+                    haptic(.medium)
+                }
             }
         case .ready:
             if !loose {
@@ -482,6 +488,8 @@ final class CameraModel: NSObject, ObservableObject {
             setHint(directionHint(dx: dx, dy: dy, tolX: tolX, tolY: tolY, subject: t.subject))
         case .zooming:
             setHint("Centered — framing up…")
+        case .refining:
+            setHint("Taking a closer look…")
         case .ready:
             if !cameraSettled {
                 setHint("Focusing…")
@@ -661,6 +669,63 @@ final class CameraModel: NSObject, ObservableObject {
         }
         ideaIndex = 0
         if let first = ideas.first { activate(first) }
+    }
+
+    /// Zoomed in on the subject: ask the AI for a tighter, more precise crop.
+    private func refine(_ t: AimTarget) {
+        phase = .refining
+        setHint("Taking a closer look…")
+        scanToken += 1
+        let token = scanToken
+        let r0 = attitude
+        let z0 = zoomFactor
+        let geo = geometry
+        let orient = orientation
+        let aspect = ShotAspect.current
+        let wOverH = aspect.wOverH(landscape: orient.isLandscape)
+        let key = AIConfig.key
+        let model = AIConfig.modelID
+
+        requestSnapshot { [weak self] buffer in
+            guard let self = self else { return }
+            guard let snap = self.makeJPEG(buffer, orientation: orient.bufferOrientation) else {
+                DispatchQueue.main.async { self.finishRefine(nil, from: t, r: r0, zoom: z0, geo: geo, orient: orient, token: token) }
+                return
+            }
+            Task {
+                let box = try? await AIScout.refineCrop(
+                    jpeg: snap.data, width: snap.width, height: snap.height, key: key, model: model,
+                    subject: t.subject, aspectLabel: aspect.label(landscape: orient.isLandscape),
+                    landscape: orient.isLandscape, wOverH: wOverH)
+                await MainActor.run {
+                    self.finishRefine(box, from: t, r: r0, zoom: z0, geo: geo, orient: orient, token: token)
+                }
+            }
+        }
+    }
+
+    private func finishRefine(_ box: CGRect?, from t: AimTarget, r: simd_double3x3, zoom: Double,
+                              geo: CameraGeometry, orient: ShotOrientation, token: Int) {
+        guard token == scanToken, target != nil else { return }
+        var next = t
+        if let box = box {
+            let portraitBox = OrientMath.toPortrait(box, from: orient)
+            next = AimMath.target(from: OrientMath.flipY(portraitBox), r: r, zoom: zoom, geo: geo,
+                                  landscape: orient.isLandscape, subject: t.subject, why: t.why,
+                                  score: t.score, exposure: t.exposure)
+        }
+        next.refined = true
+        target = next
+        if ideaIndex < ideas.count { ideas[ideaIndex] = next }
+        targetZoom = nil
+        if box != nil {
+            phase = .guiding          // re-centre and zoom on the tighter frame
+            updateGuide(spin: 1)
+        } else {
+            phase = .ready            // keep the first framing
+            focusOnFrame()
+            haptic(.medium)
+        }
     }
 
     /// Show the next AI idea (if it found more than one).
