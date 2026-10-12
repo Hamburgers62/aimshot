@@ -5,6 +5,14 @@ struct ShotIdea {
     var subject: String
     var why: String
     var box: CGRect   // normalized, origin top-left, in the image that was sent
+    var score: Int = 0
+    var exposure: Double = 0
+}
+
+struct ScanResult {
+    var ideas: [ShotIdea]
+    /// When nothing is worth shooting: where to point instead.
+    var tip: String?
 }
 
 enum AIScoutError: LocalizedError {
@@ -38,7 +46,7 @@ enum AIScout {
 
     static func findShots(jpeg: Data, width: Int, height: Int, key: String, model: String,
                           aspectLabel: String, landscape: Bool, wOverH: Double,
-                          style: ShotStyle, count: Int) async throws -> [ShotIdea] {
+                          style: ShotStyle, count: Int) async throws -> ScanResult {
         let p = scanPrompt(width: width, height: height, aspectLabel: aspectLabel,
                            landscape: landscape, style: style, count: count)
         let text = try await ask(jpeg: jpeg, prompt: p, key: key, model: model, maxTokens: 2000)
@@ -53,23 +61,31 @@ enum AIScout {
         return """
         You are the eye of a photography app. This image is the live camera view, \(width)x\(height) pixels, phone held \(held).
 
-        Find \(howMany) hiding in this view: the subjects or details a good photographer would walk up to and shoot. Look for warm or dramatic light, glowing objects, texture, reflections, strong shapes, a clear subject against a simple background. Avoid screens, clutter, half-cut objects and empty areas.
+        Find \(howMany) hiding in this view: the subjects or details a good photographer would walk up to and shoot. Look for warm or dramatic light, glowing objects, texture, reflections, strong shapes, a clear subject against a simple background. Avoid screens, clutter, half-cut objects, messy backgrounds and empty areas.
         \(style.promptLine)
 
-        Each photo is a \(aspectLabel) \(shape) crop (width:height = \(aspectLabel)). Frame each around its subject with a little breathing room. Crops can be much smaller than the whole view, because the app zooms in.
+        Be picky and honest. Score each shot 1-10 for how good the final photo would really look. Name the subject exactly as it is (don't call a laptop a magazine). If nothing here would score 5 or more, return an empty list and say where to point instead.
+
+        If it's dark, prefer subjects that are well lit (signs, windows, lamps, lit buildings) and keep crops larger, because zooming far in at night makes photos soft.
+
+        Each photo is a \(aspectLabel) \(shape) crop (width:height = \(aspectLabel)). Frame each around its subject with a little breathing room. Crops can be smaller than the whole view, because the app zooms in.
+
+        exposure is a tweak in stops from -1 to 1: negative for bright lights, signs and screens so they don't blow out, positive for dim subjects, 0 if fine.
 
         Reply with ONLY this JSON, no markdown, no other text:
-        {"shots": [{"subject": "2-4 word name, lowercase", "why": "coaching line, max 8 words, lowercase, e.g. soft side light, let the color glow", "box": [x, y, width, height]}]}
+        {"shots": [{"subject": "2-4 word name, lowercase", "why": "coaching line, max 8 words, lowercase, e.g. soft side light, let the color glow", "score": 1-10, "exposure": -1.0-1.0, "box": [x, y, width, height]}], "tip": "only if the list is empty: where to point instead, max 10 words"}
 
         box is in pixels of this image, origin top-left, and must contain the whole subject.
         """
     }
 
-    static func parseShots(text: String, width: Int, height: Int, wOverH: Double, count: Int) throws -> [ShotIdea] {
+    static func parseShots(text: String, width: Int, height: Int, wOverH: Double, count: Int) throws -> ScanResult {
         guard let json = extractJSON(text) else { throw AIScoutError.unreadable(snippet(text)) }
 
         var raw: [[String: Any]] = []
+        var tip: String? = nil
         if let dict = json as? [String: Any] {
+            tip = dict["tip"] as? String
             if let shots = dict["shots"] as? [[String: Any]] {
                 raw = shots
             } else if dict["box"] != nil {
@@ -88,11 +104,16 @@ enum AIScout {
             }
             let subject = (item["subject"] as? String) ?? (item["name"] as? String) ?? "nice shot"
             let why = (item["why"] as? String) ?? (item["reason"] as? String) ?? ""
+            let score = Int((number(item["score"]) ?? 6).rounded())
+            let exposure = min(max(number(item["exposure"]) ?? 0, -1), 1)
             return ShotIdea(subject: subject.lowercased(), why: why.lowercased(),
-                            box: frame(box: b, fullW: fullW, fullH: fullH, wOverH: wOverH))
+                            box: frame(box: b, fullW: fullW, fullH: fullH, wOverH: wOverH),
+                            score: min(max(score, 1), 10), exposure: exposure)
         }
-        guard !ideas.isEmpty else { throw AIScoutError.unreadable(snippet(text)) }
-        return ideas
+        // Drop weak ideas; best first.
+        let good = ideas.filter { $0.score >= 5 }.sorted { $0.score > $1.score }
+        if good.isEmpty && raw.isEmpty && tip == nil { throw AIScoutError.unreadable(snippet(text)) }
+        return ScanResult(ideas: good, tip: tip)
     }
 
     // MARK: Suggest an edit

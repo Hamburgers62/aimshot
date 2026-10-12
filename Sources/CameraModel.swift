@@ -57,6 +57,8 @@ final class CameraModel: NSObject, ObservableObject {
     private var attitude: simd_double3x3 = matrix_identity_double3x3
     private var zoomFactor: Double = 1      // mirrors device.videoZoomFactor
     private var uwFactor: Double = 1        // zoom factor that equals "1x"
+    private var teleZoom: Double = 2        // zoom factor of the longest real lens
+    private var aiExposure: Double = 0      // AI's exposure tweak for the current target
     private var minZoom: Double = 1
     private var maxZoom: Double = 10
     private var scanZoom: Double = 1
@@ -149,6 +151,12 @@ final class CameraModel: NSObject, ObservableObject {
         session.commitConfiguration()
         self.device = device
 
+        // Capture at full sensor resolution (48MP on newer iPhones) so crops keep their detail.
+        let sizes = device.activeFormat.supportedMaxPhotoDimensions
+        if let biggest = sizes.max(by: { Int($0.width) * Int($0.height) < Int($1.width) * Int($1.height) }) {
+            photoOutput.maxPhotoDimensions = biggest
+        }
+
         let raws = photoOutput.availableRawPhotoPixelFormatTypes
         rawFormat = raws.first(where: { AVCapturePhotoOutput.isAppleProRAWPixelFormat($0) }) ?? raws.first
         let hasRaw = rawFormat != nil
@@ -205,6 +213,7 @@ final class CameraModel: NSObject, ObservableObject {
             self.maxZoom = maxZ
             self.scanZoom = startZ
             self.zoomStops = stops
+            self.teleZoom = hasTele ? (switches.last ?? uw * 2) : uw * 2
             if biasLow < biasHigh { self.exposureRange = biasLow...biasHigh }
         }
 
@@ -285,11 +294,45 @@ final class CameraModel: NSObject, ObservableObject {
 
     /// Brighter / darker, in EV stops.
     func setExposure(_ value: Double) {
-        let v = min(max(value, exposureRange.lowerBound), exposureRange.upperBound)
-        exposureBias = v
+        exposureBias = min(max(value, exposureRange.lowerBound), exposureRange.upperBound)
+        applyExposure()
+    }
+
+    /// Sends your exposure setting plus the AI's tweak for the current shot to the camera.
+    private func applyExposure() {
+        let v = min(max(exposureBias + aiExposure, exposureRange.lowerBound), exposureRange.upperBound)
         sessionQueue.async {
             guard let d = self.device, (try? d.lockForConfiguration()) != nil else { return }
             d.setExposureTargetBias(Float(v), completionHandler: nil)
+            d.unlockForConfiguration()
+        }
+    }
+
+    /// Dark scene: slow shutter or high ISO.
+    private var isLowLight: Bool {
+        guard let d = device else { return false }
+        return d.exposureDuration.seconds > 1.0 / 40 || d.iso >= 800
+    }
+
+    /// True once focus and exposure have stopped moving.
+    private var cameraSettled: Bool {
+        guard let d = device else { return true }
+        return !d.isAdjustingFocus && !d.isAdjustingExposure
+    }
+
+    /// One-shot autofocus on the middle of the view (where the frame is).
+    private func focusOnFrame() {
+        sessionQueue.async {
+            guard let d = self.device, (try? d.lockForConfiguration()) != nil else { return }
+            let centre = CGPoint(x: 0.5, y: 0.5)
+            if d.isFocusPointOfInterestSupported && d.isFocusModeSupported(.autoFocus) {
+                d.focusPointOfInterest = centre
+                d.focusMode = .autoFocus
+            }
+            if d.isExposurePointOfInterestSupported && d.isExposureModeSupported(.continuousAutoExposure) {
+                d.exposurePointOfInterest = centre
+                d.exposureMode = .continuousAutoExposure
+            }
             d.unlockForConfiguration()
         }
     }
@@ -407,7 +450,9 @@ final class CameraModel: NSObject, ObservableObject {
         case .guiding:
             if centred {
                 let fill = zoomFactor * 0.92 / Double(max(rect.width, rect.height))
-                let z = min(max(fill, minZoom), maxZoom)
+                // Past the real telephoto lens it's just digital zoom; at night stop at the lens.
+                let cap = min(maxZoom, isLowLight ? teleZoom : teleZoom * 1.6)
+                let z = min(max(fill, minZoom), max(cap, minZoom))
                 targetZoom = z
                 phase = .zooming
                 rampZoom(to: z, rate: 2.5)
@@ -420,6 +465,7 @@ final class CameraModel: NSObject, ObservableObject {
                 stopZoomRamp()
             } else if let tz = targetZoom, abs(zoomFactor - tz) < 0.03 * tz {
                 phase = .ready
+                focusOnFrame()
                 haptic(.medium)
             }
         case .ready:
@@ -437,25 +483,34 @@ final class CameraModel: NSObject, ObservableObject {
         case .zooming:
             setHint("Centered — framing up…")
         case .ready:
-            setHint(t.why)
+            if !cameraSettled {
+                setHint("Focusing…")
+            } else if isLowLight && (steadySince == nil) {
+                setHint("Low light. Hold very still")
+            } else {
+                setHint(t.why)
+            }
         default:
             break
         }
 
-        // Auto-shoot once it's framed and you're holding still.
+        // Auto-shoot once it's framed, focused, and you're holding still (longer and stiller at night).
         if phase == .ready {
-            if spin < 0.25 {
+            let dark = isLowLight
+            let maxSpin = dark ? 0.12 : 0.25
+            let needed = dark ? 1.3 : 0.8
+            if spin < maxSpin && cameraSettled {
                 if steadySince == nil { steadySince = Date() }
             } else {
                 steadySince = nil
             }
             let held = steadySince.map { Date().timeIntervalSince($0) } ?? 0
             let auto = UserDefaults.standard.object(forKey: "autoShoot") as? Bool ?? true
-            let progress = auto ? min(held / 0.8, 1) : 0
+            let progress = auto ? min(held / needed, 1) : 0
             if abs(progress - shootProgress) > 0.02 || (progress == 0 && shootProgress != 0) {
                 shootProgress = progress
             }
-            if auto && held >= 0.8 && !isShooting { capture() }
+            if auto && held >= needed && !isShooting { capture() }
         } else {
             resetShootTimer()
         }
@@ -560,7 +615,14 @@ final class CameraModel: NSObject, ObservableObject {
                         style: style, count: count)
                     await MainActor.run {
                         guard token == self.scanToken else { return }
-                        self.setIdeas(shots, r: r0, zoom: z0, geo: geo, orient: orient)
+                        if shots.ideas.isEmpty {
+                            self.phase = .idle
+                            let tip = shots.tip ?? "try a spot with better light"
+                            self.setHint("Nothing great here. \(tip.prefix(1).uppercased() + tip.dropFirst())")
+                            self.haptic(.light)
+                        } else {
+                            self.setIdeas(shots.ideas, r: r0, zoom: z0, geo: geo, orient: orient)
+                        }
                     }
                 } catch {
                     await MainActor.run { self.scanFailed(error.localizedDescription, token: token) }
@@ -594,7 +656,8 @@ final class CameraModel: NSObject, ObservableObject {
         ideas = shots.map { shot in
             let portraitBox = OrientMath.toPortrait(shot.box, from: orient)
             return AimMath.target(from: OrientMath.flipY(portraitBox), r: r, zoom: zoom, geo: geo,
-                                  landscape: orient.isLandscape, subject: shot.subject, why: shot.why)
+                                  landscape: orient.isLandscape, subject: shot.subject, why: shot.why,
+                                  score: shot.score, exposure: shot.exposure)
         }
         ideaIndex = 0
         if let first = ideas.first { activate(first) }
@@ -614,6 +677,8 @@ final class CameraModel: NSObject, ObservableObject {
         resetShootTimer()
         phase = .guiding
         resetFocus()
+        aiExposure = t.exposure
+        applyExposure()
         haptic(.light)
         updateGuide(spin: 1)
     }
@@ -628,6 +693,10 @@ final class CameraModel: NSObject, ObservableObject {
         resetShootTimer()
         phase = .idle
         setHint(idleHint)
+        if aiExposure != 0 {
+            aiExposure = 0
+            applyExposure()
+        }
         if resetZoom { rampZoom(to: scanZoom, rate: 6) }
     }
 
@@ -639,7 +708,7 @@ final class CameraModel: NSObject, ObservableObject {
     private func makeJPEG(_ buffer: CVPixelBuffer, orientation: CGImagePropertyOrientation)
         -> (data: Data, width: Int, height: Int)? {
         let upright = CIImage(cvPixelBuffer: buffer).oriented(orientation)
-        let scale = 1024.0 / max(upright.extent.width, upright.extent.height)
+        let scale = 1280.0 / max(upright.extent.width, upright.extent.height)
         let scaled = upright.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
         guard let cs = CGColorSpace(name: CGColorSpace.sRGB),
               let data = ciContext.jpegRepresentation(
@@ -667,6 +736,7 @@ final class CameraModel: NSObject, ObservableObject {
         }
         let subject = target?.subject ?? "photo"
         let why = target?.why ?? ""
+        let score = (target?.score ?? 0) > 0 ? target?.score : nil
         let wantRaw = rawSupported && UserDefaults.standard.bool(forKey: "raw")
         let flashMode = FlashSetting.current.mode
 
@@ -686,7 +756,7 @@ final class CameraModel: NSObject, ObservableObject {
                 }
             }
             let delegate = PhotoCaptureDelegate { [weak self] result in
-                self?.finishCapture(result, crop: crop, subject: subject, why: why)
+                self?.finishCapture(result, crop: crop, subject: subject, why: why, score: score)
             }
             self.photoDelegate = delegate
             self.photoOutput.capturePhoto(with: settings, delegate: delegate)
@@ -702,8 +772,9 @@ final class CameraModel: NSObject, ObservableObject {
             settings = AVCapturePhotoSettings(rawPixelFormatType: fmt, processedFormat: processed)
         } else {
             settings = AVCapturePhotoSettings(format: processed)
-            settings.photoQualityPrioritization = .balanced
+            settings.photoQualityPrioritization = .quality   // multi-frame fusion: less noise and blur
         }
+        settings.maxPhotoDimensions = photoOutput.maxPhotoDimensions
         if photoOutput.supportedFlashModes.contains(flash) {
             settings.flashMode = flash
         }
@@ -712,7 +783,7 @@ final class CameraModel: NSObject, ObservableObject {
 
     /// Runs on main. Frees the shutter straight away, then develops and saves in the background:
     /// to Photos (with your default look or an AI-picked edit) and to the shot history.
-    private func finishCapture(_ result: CaptureResult, crop: CGRect?, subject: String, why: String) {
+    private func finishCapture(_ result: CaptureResult, crop: CGRect?, subject: String, why: String, score: Int?) {
         sessionQueue.async { self.photoDelegate = nil }
         isShooting = false
         if target != nil { clearTarget(resetZoom: true) }
@@ -758,7 +829,7 @@ final class CameraModel: NSObject, ObservableObject {
             let thumb = thumbSource.preparingThumbnail(of: CGSize(width: 300, height: 300)) ?? thumbSource
 
             ShotLibrary.shared.store(photo: clean, thumb: thumb, subject: subject, why: why,
-                                     specs: specs, edits: edits, editNote: note)
+                                     specs: specs, edits: edits, editNote: note, score: score)
 
             let lookName = FilmLab.look(edits.look).name
             let aiEdited = note != nil

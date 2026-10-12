@@ -503,7 +503,7 @@ struct ContentView: View {
                     .frame(width: r.width, height: r.height)
                     .position(x: r.midX, y: r.midY)
 
-                subjectLabel(t.subject, ready: ready)
+                subjectLabel(t.subject, score: t.score, ready: ready)
                     .rotationEffect(iconAngle)
                     .position(labelPosition(for: r, in: size))
             }
@@ -530,9 +530,16 @@ struct ContentView: View {
         .allowsHitTesting(false)
     }
 
-    private func subjectLabel(_ text: String, ready: Bool) -> some View {
-        Text(text)
-            .font(Theme.note(16))
+    private func subjectLabel(_ text: String, score: Int, ready: Bool) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(text)
+                .font(Theme.note(16))
+            if score > 0 {
+                Text("\(score)/10")
+                    .font(Theme.ui(11, .semibold).monospacedDigit())
+                    .opacity(0.75)
+            }
+        }
             .lineLimit(1)
             .fixedSize()
             .foregroundColor(ready ? Theme.go : Theme.amber)

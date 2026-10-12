@@ -183,6 +183,9 @@ struct ShotDetailView: View {
 
                         VStack(alignment: .leading, spacing: 6) {
                             Text(shot.date.formatted(date: .abbreviated, time: .shortened))
+                            if let score = shot.score {
+                                Text("AI rated it \(score)/10")
+                            }
                             if !shot.specs.isEmpty { Text(shot.specs) }
                             if !shot.edits.isPlain {
                                 Text("Look: \(FilmLab.look(shot.edits.look).name)")
