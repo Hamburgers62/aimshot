@@ -33,6 +33,8 @@ final class CameraModel: NSObject, ObservableObject {
     @Published var isShooting = false
     @Published var flash = false
     @Published var rawSupported = false
+    @Published var exposureBias: Double = 0
+    @Published var exposureRange: ClosedRange<Double> = -2...2
 
     let session = AVCaptureSession()
     weak var previewLayer: AVCaptureVideoPreviewLayer?
@@ -61,6 +63,9 @@ final class CameraModel: NSObject, ObservableObject {
     private var lastZoomCommand: Double? = nil
     private var steadySince: Date? = nil
     private var scanToken = 0
+    private var idleSteadySince: Date? = nil
+    private var lastScanTime: Date = .distantPast
+    private var lastScanForward: SIMD3<Double>? = nil
 
     // MARK: Snapshot (videoQueue only)
     private var snapshotHandler: ((CVPixelBuffer) -> Void)?
@@ -68,6 +73,8 @@ final class CameraModel: NSObject, ObservableObject {
     // MARK: Lifecycle
 
     func start() {
+        if lastPhoto == nil { lastPhoto = ShotLibrary.shared.latestThumbnail }
+        if phase == .idle { setHint(idleHint) }
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
             run()
@@ -176,6 +183,8 @@ final class CameraModel: NSObject, ObservableObject {
         let ratio = longSide > 0 ? shortSide / longSide : 0.75
         let geo = CameraGeometry(tanHalfW: tanLong * ratio, tanHalfH: tanLong)
 
+        let biasLow = max(Double(device.minExposureTargetBias), -3)
+        let biasHigh = min(Double(device.maxExposureTargetBias), 3)
         let minZ = Double(device.minAvailableVideoZoomFactor)
         let maxZ = min(Double(device.maxAvailableVideoZoomFactor), uw * 15)
 
@@ -192,6 +201,7 @@ final class CameraModel: NSObject, ObservableObject {
             self.maxZoom = maxZ
             self.scanZoom = minZ
             self.zoomStops = stops
+            if biasLow < biasHigh { self.exposureRange = biasLow...biasHigh }
         }
 
         zoomObservation = device.observe(\.videoZoomFactor, options: [.initial, .new]) { [weak self] dev, _ in
@@ -269,6 +279,49 @@ final class CameraModel: NSObject, ObservableObject {
         }
     }
 
+    /// Brighter / darker, in EV stops.
+    func setExposure(_ value: Double) {
+        let v = min(max(value, exposureRange.lowerBound), exposureRange.upperBound)
+        exposureBias = v
+        sessionQueue.async {
+            guard let d = self.device, (try? d.lockForConfiguration()) != nil else { return }
+            d.setExposureTargetBias(Float(v), completionHandler: nil)
+            d.unlockForConfiguration()
+        }
+    }
+
+    // MARK: Auto-scan
+
+    private var autoScanOn: Bool { UserDefaults.standard.bool(forKey: "autoScan") }
+
+    var idleHint: String {
+        autoScanOn ? "Hold still to auto-scan, or tap ✦" : "Tap ✦ to scan the scene"
+    }
+
+    /// Scans by itself when you hold still on a new view.
+    private func checkAutoScan(spin: Double) {
+        guard autoScanOn, phase == .idle, !isShooting else {
+            idleSteadySince = nil
+            return
+        }
+        if spin > 0.2 {
+            idleSteadySince = nil
+            return
+        }
+        if idleSteadySince == nil { idleSteadySince = Date() }
+        guard let since = idleSteadySince,
+              Date().timeIntervalSince(since) > 1.2,
+              Date().timeIntervalSince(lastScanTime) > 6 else { return }
+
+        let forward = AimMath.toWorld(SIMD3(0, 0, -1), attitude)
+        if let last = lastScanForward, Date().timeIntervalSince(lastScanTime) < 45 {
+            let angle = acos(min(max(simd_dot(forward, last), -1), 1))
+            guard angle > 0.3 else { return }   // same view as last time
+        }
+        idleSteadySince = nil
+        scan()
+    }
+
     // MARK: Motion
 
     private func startMotion() {
@@ -303,6 +356,7 @@ final class CameraModel: NSObject, ObservableObject {
         let rr = m.rotationRate
         let spin = sqrt(rr.x * rr.x + rr.y * rr.y + rr.z * rr.z)
         updateGuide(spin: spin)
+        checkAutoScan(spin: spin)
     }
 
     // MARK: Guiding
@@ -440,6 +494,8 @@ final class CameraModel: NSObject, ObservableObject {
         let token = scanToken
         phase = .scanning
         setHint("Looking for the best shot…")
+        lastScanTime = Date()
+        lastScanForward = AimMath.toWorld(SIMD3(0, 0, -1), attitude)
 
         let r0 = attitude
         let z0 = zoomFactor
@@ -495,8 +551,9 @@ final class CameraModel: NSObject, ObservableObject {
     private func scanFailed(_ message: String, token: Int) {
         guard token == scanToken else { return }
         phase = .idle
-        setHint("Tap ✦ to scan the scene")
+        setHint(idleHint)
         showToast(message)
+        lastScanTime = Date().addingTimeInterval(54)   // pause auto-scan for a minute after an error
     }
 
     /// Your own frame: the user drew a box (normalized Vision coords in the preview).
@@ -549,7 +606,7 @@ final class CameraModel: NSObject, ObservableObject {
         targetZoom = nil
         resetShootTimer()
         phase = .idle
-        setHint("Tap ✦ to scan the scene")
+        setHint(idleHint)
         if resetZoom { rampZoom(to: scanZoom, rate: 6) }
     }
 
@@ -587,6 +644,8 @@ final class CameraModel: NSObject, ObservableObject {
                 crop = OrientMath.fromPortrait(OrientMath.flipY(c), to: orient)
             }
         }
+        let subject = target?.subject ?? "photo"
+        let why = target?.why ?? ""
         let wantRaw = rawSupported && UserDefaults.standard.bool(forKey: "raw")
         let flashMode = FlashSetting.current.mode
 
@@ -606,7 +665,7 @@ final class CameraModel: NSObject, ObservableObject {
                 }
             }
             let delegate = PhotoCaptureDelegate { [weak self] result in
-                self?.finishCapture(result, crop: crop)
+                self?.finishCapture(result, crop: crop, subject: subject, why: why)
             }
             self.photoDelegate = delegate
             self.photoOutput.capturePhoto(with: settings, delegate: delegate)
@@ -630,8 +689,8 @@ final class CameraModel: NSObject, ObservableObject {
         return settings
     }
 
-    /// Runs on main.
-    private func finishCapture(_ result: CaptureResult, crop: CGRect?) {
+    /// Runs on main. Saves to Photos (with your default look, if any) and to the shot history.
+    private func finishCapture(_ result: CaptureResult, crop: CGRect?, subject: String, why: String) {
         sessionQueue.async { self.photoDelegate = nil }
         guard let data = result.processed, let image = UIImage(data: data) else {
             isShooting = false
@@ -640,12 +699,28 @@ final class CameraModel: NSObject, ObservableObject {
         }
         let metadata = result.metadata
         let raw = result.raw
+        let edits = EditSettings.forNewShots
         DispatchQueue.global(qos: .userInitiated).async {
             let upright = image.normalizedUp()
             let final = crop.map { upright.cropped(toTopLeftRect: $0) } ?? upright
-            let thumb = final.preparingThumbnail(of: CGSize(width: 240, height: 240)) ?? final
-            let encoded = final.cgImage.flatMap { PhotoSaver.encode($0, metadata: metadata) } ?? data
-            PhotoSaver.save(photo: encoded, raw: raw) { ok in
+            let specs = PhotoSpecs.describe(metadata)
+            let clean = final.cgImage.flatMap { PhotoSaver.encode($0, metadata: metadata) } ?? data
+
+            // Styled copy for Photos if a default look/frame is set.
+            var toPhotos = clean
+            var thumbSource = final
+            if !edits.isPlain, let cg = final.cgImage,
+               let styled = FilmLab.renderFinal(cg, edits, date: Date(), specs: specs),
+               let styledData = PhotoSaver.encode(styled, metadata: metadata) {
+                toPhotos = styledData
+                thumbSource = UIImage(cgImage: styled)
+            }
+            let thumb = thumbSource.preparingThumbnail(of: CGSize(width: 300, height: 300)) ?? thumbSource
+
+            ShotLibrary.shared.store(photo: clean, thumb: thumb, subject: subject, why: why,
+                                     specs: specs, edits: edits)
+
+            PhotoSaver.save(photo: toPhotos, raw: raw) { ok in
                 self.lastPhoto = thumb
                 self.isShooting = false
                 if ok {

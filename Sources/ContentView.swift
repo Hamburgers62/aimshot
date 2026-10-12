@@ -5,6 +5,8 @@ struct ContentView: View {
     @State private var dragRect: CGRect? = nil
     @State private var focusPoint: CGPoint? = nil
     @State private var showSettings = false
+    @State private var showLibrary = false
+    @State private var showExposure = false
     @AppStorage("autoShoot") private var autoShoot = true
     @AppStorage("aspect") private var aspectRaw = ShotAspect.fourFive.rawValue
     @AppStorage("raw") private var rawOn = false
@@ -68,8 +70,14 @@ struct ContentView: View {
                     .padding(.top, 6)
                 }
 
-                zoomPills
-                    .padding(.top, 10)
+                Group {
+                    if showExposure {
+                        exposureRow
+                    } else {
+                        zoomPills
+                    }
+                }
+                .padding(.top, 10)
 
                 Spacer(minLength: 0)
 
@@ -102,6 +110,7 @@ struct ContentView: View {
         .animation(.easeInOut(duration: 0.25), value: camera.orientation)
         .statusBarHidden(true)
         .sheet(isPresented: $showSettings) { SettingsView() }
+        .sheet(isPresented: $showLibrary) { LibraryView() }
         .onAppear { camera.start() }
         .onChange(of: scenePhase) { phase in
             if phase == .active {
@@ -162,6 +171,17 @@ struct ContentView: View {
             }
             .buttonStyle(.plain)
 
+            Button {
+                showExposure.toggle()
+            } label: {
+                Image(systemName: "plusminus.circle")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundColor(showExposure || camera.exposureBias != 0 ? yellow : .white)
+                    .frame(width: 34, height: 34)
+                    .rotationEffect(iconAngle)
+            }
+            .buttonStyle(.plain)
+
             Spacer()
 
             Button {
@@ -199,6 +219,33 @@ struct ContentView: View {
         case .idle: return .white.opacity(0.6)
         default: return .white
         }
+    }
+
+    // MARK: Exposure
+
+    private var exposureRow: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "sun.max")
+                .foregroundColor(yellow)
+                .rotationEffect(iconAngle)
+            Slider(value: Binding(get: { camera.exposureBias },
+                                  set: { camera.setExposure($0) }),
+                   in: camera.exposureRange)
+                .tint(yellow)
+            Button {
+                camera.setExposure(0)
+            } label: {
+                Text(String(format: "%+.1f", camera.exposureBias))
+                    .font(.system(size: 14, weight: .semibold).monospacedDigit())
+                    .foregroundColor(.white)
+                    .frame(width: 46, height: 46)
+                    .background(Circle().fill(Color.white.opacity(0.1)))
+                    .rotationEffect(iconAngle)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 28)
+        .frame(height: 46)
     }
 
     // MARK: Zoom buttons
@@ -254,9 +301,7 @@ struct ContentView: View {
 
     private var thumbnail: some View {
         Button {
-            if let url = URL(string: "photos-redirect://") {
-                UIApplication.shared.open(url)
-            }
+            showLibrary = true
         } label: {
             Group {
                 if let image = camera.lastPhoto {

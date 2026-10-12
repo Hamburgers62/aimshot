@@ -150,6 +150,18 @@ struct SettingsView: View {
     @AppStorage("aiModel") private var model: String = AIModel.sonnet.rawValue
     @AppStorage("autoShoot") private var autoShoot: Bool = true
     @AppStorage("customModel") private var customModel: String = ""
+    @AppStorage("autoScan") private var autoScan: Bool = false
+    @State private var defaultLookName: String = SettingsView.describeDefault()
+
+    private static func describeDefault() -> String {
+        let d = EditSettings.forNewShots
+        if d.isPlain { return "None" }
+        var parts: [String] = []
+        if d.look != "none" { parts.append(FilmLab.look(d.look).name) }
+        if d.frame != .none { parts.append(d.frame.label + " frame") }
+        if d.dateStamp { parts.append("date stamp") }
+        return parts.isEmpty ? "Custom adjustments" : parts.joined(separator: " + ")
+    }
 
     private var trimmedKey: String { key.trimmingCharacters(in: .whitespacesAndNewlines) }
 
@@ -204,6 +216,26 @@ struct SettingsView: View {
 
                 Section {
                     Toggle("Auto-shoot when lined up", isOn: $autoShoot)
+                    Toggle("Auto-scan when you hold still", isOn: $autoScan)
+                } footer: {
+                    Text("Auto-scan looks for a shot whenever you point at a new view and hold still. Each scan uses a bit of AI credit.")
+                }
+
+                Section {
+                    HStack {
+                        Text("Look for new shots")
+                        Spacer()
+                        Text(defaultLookName)
+                            .foregroundColor(.secondary)
+                    }
+                    if defaultLookName != "None" {
+                        Button("Reset to no look", role: .destructive) {
+                            EditSettings.forNewShots = EditSettings()
+                            defaultLookName = "None"
+                        }
+                    }
+                } footer: {
+                    Text("Set this from the editor: open a shot, pick a look or frame, tap “Use for new shots”. Your shot history always keeps the clean original.")
                 }
             }
             .navigationTitle("Settings")
