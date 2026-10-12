@@ -1,0 +1,36 @@
+name: Build IPA
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build (unsigned)
+        run: |
+          xcodebuild -project Aimshot.xcodeproj -scheme Aimshot -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/Aimshot.xcarchive" archive \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
+
+      - name: Package .ipa
+        run: |
+          mkdir -p Payload
+          cp -R "$RUNNER_TEMP/Aimshot.xcarchive/Products/Applications/Aimshot.app" Payload/
+          zip -qry Aimshot.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Aimshot-ipa
+          path: Aimshot.ipa

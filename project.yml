@@ -1,0 +1,32 @@
+name: Aimshot
+options:
+  bundleIdPrefix: com.artis
+  deploymentTarget:
+    iOS: "16.0"
+
+targets:
+  Aimshot:
+    type: application
+    platform: iOS
+    sources: [Sources]
+    scheme: {}
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Aimshot
+        CFBundleShortVersionString: "0.1"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        UIRequiresFullScreen: true
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        NSCameraUsageDescription: Aimshot uses the camera to help you frame and take photos.
+        NSPhotoLibraryAddUsageDescription: Aimshot saves the photos you take to your library.
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.artis.aimshot
+        TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_VERSION: "5.0"
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGNING_ALLOWED: NO
