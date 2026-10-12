@@ -23,6 +23,7 @@ final class CameraModel: NSObject, ObservableObject {
     @Published var frameRect: CGRect? = nil
     @Published var hint: String = "Tap ✦ to scan the scene"
     @Published var roll: Double = 0
+    @Published var isLevel = false
     @Published var orientation: ShotOrientation = .portrait
     @Published var displayZoom: Double = 1
     @Published var zoomStops: [Double] = [1]
@@ -62,6 +63,7 @@ final class CameraModel: NSObject, ObservableObject {
     private var targetZoom: Double? = nil
     private var lastZoomCommand: Double? = nil
     private var steadySince: Date? = nil
+    private var smoothRoll: Double = 0
     private var scanToken = 0
     private var idleSteadySince: Date? = nil
     private var lastScanTime: Date = .distantPast
@@ -188,9 +190,11 @@ final class CameraModel: NSObject, ObservableObject {
         let minZ = Double(device.minAvailableVideoZoomFactor)
         let maxZ = min(Double(device.maxAvailableVideoZoomFactor), uw * 15)
 
-        // Start at the widest lens, so a scan sees the whole room.
+        // Start on the widest lens (sees the whole room) or 1x, per Settings.
+        let startMain = UserDefaults.standard.string(forKey: "startLens") == "main"
+        let startZ = startMain ? min(max(uw, minZ), maxZ) : minZ
         if (try? device.lockForConfiguration()) != nil {
-            device.videoZoomFactor = CGFloat(minZ)
+            device.videoZoomFactor = CGFloat(startZ)
             device.unlockForConfiguration()
         }
 
@@ -199,7 +203,7 @@ final class CameraModel: NSObject, ObservableObject {
             self.uwFactor = uw
             self.minZoom = minZ
             self.maxZoom = maxZ
-            self.scanZoom = minZ
+            self.scanZoom = startZ
             self.zoomStops = stops
             if biasLow < biasHigh { self.exposureRange = biasLow...biasHigh }
         }
@@ -294,6 +298,10 @@ final class CameraModel: NSObject, ObservableObject {
 
     private var autoScanOn: Bool { UserDefaults.standard.bool(forKey: "autoScan") }
 
+    func refreshIdleHint() {
+        if phase == .idle { setHint(idleHint) }
+    }
+
     var idleHint: String {
         autoScanOn ? "Hold still to auto-scan, or tap ✦" : "Tap ✦ to scan the scene"
     }
@@ -339,8 +347,19 @@ final class CameraModel: NSObject, ObservableObject {
 
         let gx = m.gravity.x
         let gy = m.gravity.y
-        let newRoll = atan2(gx, -gy)
-        if abs(newRoll - roll) > 0.003 { roll = newRoll }
+        // Smoothed tilt for the level line (raw sensor values jitter a lot).
+        var diff = atan2(gx, -gy) - smoothRoll
+        if diff > .pi { diff -= 2 * .pi } else if diff < -.pi { diff += 2 * .pi }
+        smoothRoll += diff * 0.12
+        if abs(smoothRoll - roll) > 0.004 { roll = smoothRoll }
+        let quarter = Double.pi / 2
+        let r = abs(smoothRoll).truncatingRemainder(dividingBy: quarter)
+        let tilt = min(r, quarter - r)
+        let nowLevel = isLevel ? tilt < 0.026 : tilt < 0.012   // in at ~0.7°, out at ~1.5°
+        if nowLevel != isLevel {
+            isLevel = nowLevel
+            if nowLevel { haptic(.soft) }
+        }
 
         // Portrait or sideways? (ignored while the phone lies flat)
         if abs(m.gravity.z) < 0.8 {
@@ -482,6 +501,7 @@ final class CameraModel: NSObject, ObservableObject {
     }
 
     private func haptic(_ style: UIImpactFeedbackGenerator.FeedbackStyle) {
+        guard UserDefaults.standard.object(forKey: "haptics") as? Bool ?? true else { return }
         DispatchQueue.main.async { UIImpactFeedbackGenerator(style: style).impactOccurred() }
     }
 
@@ -504,10 +524,10 @@ final class CameraModel: NSObject, ObservableObject {
         scanZoom = zoomFactor
         let aspect = ShotAspect.current
         let wOverH = aspect.wOverH(landscape: orient.isLandscape)
-        let key = KeyStore.load().trimmingCharacters(in: .whitespacesAndNewlines)
-        let model = AIModel(rawValue: UserDefaults.standard.string(forKey: "aiModel") ?? "") ?? .sonnet
-        let customModel = (UserDefaults.standard.string(forKey: "customModel") ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let key = AIConfig.key
+        let model = AIConfig.modelID
+        let style = ShotStyle.current
+        let count = AIConfig.ideasPerScan
 
         requestSnapshot { [weak self] buffer in
             guard let self = self else { return }
@@ -534,9 +554,10 @@ final class CameraModel: NSObject, ObservableObject {
                 do {
                     let shots = try await AIScout.findShots(
                         jpeg: snap.data, width: snap.width, height: snap.height,
-                        apiKey: key, model: model, customModel: customModel,
+                        key: key, model: model,
                         aspectLabel: aspect.label(landscape: orient.isLandscape),
-                        landscape: orient.isLandscape, wOverH: wOverH)
+                        landscape: orient.isLandscape, wOverH: wOverH,
+                        style: style, count: count)
                     await MainActor.run {
                         guard token == self.scanToken else { return }
                         self.setIdeas(shots, r: r0, zoom: z0, geo: geo, orient: orient)
@@ -689,24 +710,43 @@ final class CameraModel: NSObject, ObservableObject {
         return settings
     }
 
-    /// Runs on main. Saves to Photos (with your default look, if any) and to the shot history.
+    /// Runs on main. Frees the shutter straight away, then develops and saves in the background:
+    /// to Photos (with your default look or an AI-picked edit) and to the shot history.
     private func finishCapture(_ result: CaptureResult, crop: CGRect?, subject: String, why: String) {
         sessionQueue.async { self.photoDelegate = nil }
+        isShooting = false
+        if target != nil { clearTarget(resetZoom: true) }
+
         guard let data = result.processed, let image = UIImage(data: data) else {
-            isShooting = false
             showToast("Couldn't take the photo")
             return
         }
         let metadata = result.metadata
         let raw = result.raw
-        let edits = EditSettings.forNewShots
-        DispatchQueue.global(qos: .userInitiated).async {
+        let defaults = EditSettings.forNewShots
+        let aiEdit = UserDefaults.standard.bool(forKey: "aiEditNew")
+        let key = AIConfig.key
+        let model = AIConfig.modelID
+        if aiEdit && !key.isEmpty { showToast("Developing with AI…") }
+
+        Task.detached(priority: .userInitiated) {
             let upright = image.normalizedUp()
             let final = crop.map { upright.cropped(toTopLeftRect: $0) } ?? upright
             let specs = PhotoSpecs.describe(metadata)
             let clean = final.cgImage.flatMap { PhotoSaver.encode($0, metadata: metadata) } ?? data
 
-            // Styled copy for Photos if a default look/frame is set.
+            var edits = defaults
+            var note: String? = nil
+            if aiEdit && !key.isEmpty,
+               let small = final.preparingThumbnail(of: CGSize(width: 1024, height: 1024)),
+               let jpeg = small.jpegData(compressionQuality: 0.7),
+               let suggestion = try? await AIScout.suggestEdit(jpeg: jpeg, key: key, model: model, subject: subject) {
+                edits = suggestion.settings
+                edits.frame = defaults.frame
+                edits.dateStamp = defaults.dateStamp
+                note = suggestion.note
+            }
+
             var toPhotos = clean
             var thumbSource = final
             if !edits.isPlain, let cg = final.cgImage,
@@ -718,17 +758,19 @@ final class CameraModel: NSObject, ObservableObject {
             let thumb = thumbSource.preparingThumbnail(of: CGSize(width: 300, height: 300)) ?? thumbSource
 
             ShotLibrary.shared.store(photo: clean, thumb: thumb, subject: subject, why: why,
-                                     specs: specs, edits: edits)
+                                     specs: specs, edits: edits, editNote: note)
 
+            let lookName = FilmLab.look(edits.look).name
+            let aiEdited = note != nil
             PhotoSaver.save(photo: toPhotos, raw: raw) { ok in
                 self.lastPhoto = thumb
-                self.isShooting = false
-                if ok {
-                    self.showToast(raw != nil ? "Saved photo + RAW" : "Saved to Photos")
-                } else {
+                if !ok {
                     self.showToast("Allow Photos access in Settings to save")
+                } else if aiEdited {
+                    self.showToast("Saved with \(lookName)")
+                } else {
+                    self.showToast(raw != nil ? "Saved photo + RAW" : "Saved to Photos")
                 }
-                if self.target != nil { self.clearTarget(resetZoom: true) }
             }
         }
     }

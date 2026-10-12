@@ -18,6 +18,26 @@ struct EditSettings: Codable, Equatable {
 
     var isPlain: Bool { self == EditSettings() }
 
+    /// Builds settings from the AI's suggestion (loose JSON), clamped to safe ranges.
+    static func fromAI(_ d: [String: Any]) -> EditSettings {
+        func num(_ key: String) -> Double? { AIScout.number(d[key]) }
+        func clamp(_ v: Double, _ lo: Double, _ hi: Double) -> Double { min(max(v, lo), hi) }
+
+        var s = EditSettings()
+        let lookID = (d["look"] as? String)?.lowercased() ?? "none"
+        s.apply(look: FilmLab.look(lookID))
+        if let v = num("strength") { s.intensity = clamp(v, 0, 1) }
+        if let v = num("exposure") { s.exposure = clamp(v, -1, 1) }
+        if let v = num("warmth") { s.warmth = clamp(v, -1, 1) }
+        if let v = num("fade") { s.fade = clamp(v, 0, 1) }
+        if let v = num("grain") { s.grain = clamp(v, 0, 0.6) }
+        if let v = num("halation") { s.halation = clamp(v, 0, 1) }
+        if let v = num("vignette") { s.vignette = clamp(v, 0, 1) }
+        if let f = (d["frame"] as? String).flatMap({ FrameStyle(rawValue: $0.lowercased()) }) { s.frame = f }
+        if let b = d["dateStamp"] as? Bool { s.dateStamp = b }
+        return s
+    }
+
     /// Picking a look sets the sliders to that look's recipe.
     mutating func apply(look l: FilmLook) {
         look = l.id
@@ -68,34 +88,34 @@ enum FilmLab {
         FilmLook(id: "none", name: "Original", saturation: 1, contrast: 1,
                  red: flat, green: flat, blue: flat,
                  warmth: 0, fade: 0, grain: 0, halation: 0, vignette: 0),
-        FilmLook(id: "golden", name: "Golden 200", saturation: 1.06, contrast: 1.05,
+        FilmLook(id: "golden", name: "Golden 200", saturation: 1.03, contrast: 1.04,
                  red: CIVector(x: 0.03, y: 1.02, z: 0, w: -0.03),
                  green: CIVector(x: 0.01, y: 1.0, z: 0, w: -0.02),
                  blue: CIVector(x: 0, y: 0.92, z: 0, w: 0),
-                 warmth: 0.25, fade: 0.1, grain: 0.2, halation: 0.15, vignette: 0.2),
+                 warmth: 0.2, fade: 0.08, grain: 0.15, halation: 0.1, vignette: 0.15),
         FilmLook(id: "soft", name: "Soft 400", saturation: 0.9, contrast: 0.95,
                  red: CIVector(x: 0.03, y: 0.97, z: 0, w: 0),
                  green: CIVector(x: 0.02, y: 0.97, z: 0, w: 0),
                  blue: CIVector(x: 0.03, y: 0.93, z: 0, w: 0),
-                 warmth: 0.15, fade: 0.2, grain: 0.25, halation: 0.1, vignette: 0.1),
+                 warmth: 0.12, fade: 0.18, grain: 0.18, halation: 0.05, vignette: 0.08),
         FilmLook(id: "night", name: "Night 800", saturation: 0.95, contrast: 1.1,
                  red: CIVector(x: 0, y: 0.95, z: 0.1, w: -0.03),
                  green: CIVector(x: 0.02, y: 0.98, z: 0, w: 0),
                  blue: CIVector(x: 0.06, y: 0.9, z: -0.05, w: 0.05),
-                 warmth: 0.1, fade: 0.15, grain: 0.45, halation: 0.5, vignette: 0.3),
+                 warmth: 0.08, fade: 0.12, grain: 0.3, halation: 0.4, vignette: 0.25),
         FilmLook(id: "slide", name: "Slide", saturation: 1.2, contrast: 1.15,
                  red: flat, green: flat,
                  blue: CIVector(x: 0.02, y: 1.02, z: 0, w: 0),
-                 warmth: -0.15, fade: 0, grain: 0.15, halation: 0.05, vignette: 0.25),
+                 warmth: -0.12, fade: 0, grain: 0.1, halation: 0.05, vignette: 0.2),
         FilmLook(id: "faded", name: "Faded", saturation: 0.8, contrast: 0.9,
                  red: flat, green: flat, blue: flat,
-                 warmth: 0.05, fade: 0.45, grain: 0.3, halation: 0, vignette: 0.15),
+                 warmth: 0.05, fade: 0.4, grain: 0.2, halation: 0, vignette: 0.12),
         FilmLook(id: "mono", name: "Mono", saturation: 0, contrast: 1.2,
                  red: flat, green: flat, blue: flat,
-                 warmth: 0, fade: 0.1, grain: 0.4, halation: 0, vignette: 0.3),
+                 warmth: 0, fade: 0.1, grain: 0.3, halation: 0, vignette: 0.25),
         FilmLook(id: "noir", name: "Noir", saturation: 0, contrast: 1.45,
                  red: flat, green: flat, blue: flat,
-                 warmth: 0, fade: 0, grain: 0.3, halation: 0, vignette: 0.45)
+                 warmth: 0, fade: 0, grain: 0.25, halation: 0, vignette: 0.4)
     ]
 
     static func look(_ id: String) -> FilmLook {
@@ -209,7 +229,7 @@ enum FilmLab {
         clamp.minComponents = CIVector(x: 0, y: 0, z: 0, w: 0)
         clamp.maxComponents = CIVector(x: 1, y: 1, z: 1, w: 1)
 
-        let a = CGFloat(amount) * 0.9
+        let a = CGFloat(amount) * 0.55
         let tint = CIFilter.colorMatrix()
         tint.inputImage = clamp.outputImage
         tint.rVector = CIVector(x: 3.2 * a, y: 0, z: 0, w: 0)
@@ -231,22 +251,37 @@ enum FilmLab {
     /// Film grain, sized relative to the photo so preview and saved photo match.
     private static func grain(_ img: CIImage, amount: Double, size: CGFloat) -> CIImage {
         let extent = img.extent
-        guard let noise = CIFilter.randomGenerator().outputImage else { return img }
-        let scale = max(size / 1400, 1)
-        let amp = CGFloat(amount) * 0.5
+        guard let random = CIFilter.randomGenerator().outputImage else { return img }
+
+        // The generator's alpha is random too; laying it over black makes it opaque
+        // without blowing the colour values up (that was the white-speck bug).
+        let black = CIImage(color: CIColor(red: 0, green: 0, blue: 0)).cropped(to: extent)
+        let scale = max(size / 1600, 0.25)
+        let opaque = random
+            .transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            .cropped(to: extent)
+            .composited(over: black)
+
+        // One channel only = monochrome grain, centred on mid-grey.
+        let amp = CGFloat(amount) * 0.22
         let m = CIFilter.colorMatrix()
-        m.inputImage = noise.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-        let v = CIVector(x: amp, y: 0, z: 0, w: 0)
+        m.inputImage = opaque
+        let v = CIVector(x: 0, y: amp, z: 0, w: 0)
         m.rVector = v
         m.gVector = v
         m.bVector = v
         m.aVector = CIVector(x: 0, y: 0, z: 0, w: 0)
         let bias = 0.5 - amp / 2
         m.biasVector = CIVector(x: bias, y: bias, z: bias, w: 1)
-        guard let grain = m.outputImage?.cropped(to: extent) else { return img }
+        guard let flat = m.outputImage else { return img }
+
+        // Soften slightly so it reads as grain, not digital noise.
+        let soft = flat.clampedToExtent()
+            .applyingGaussianBlur(sigma: Double(max(scale, 1)) * 0.45)
+            .cropped(to: extent)
 
         let blend = CIFilter.softLightBlendMode()
-        blend.inputImage = grain
+        blend.inputImage = soft
         blend.backgroundImage = img
         return blend.outputImage ?? img
     }

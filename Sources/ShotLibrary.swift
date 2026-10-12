@@ -7,6 +7,7 @@ struct ShotRecord: Codable, Identifiable, Equatable, Hashable {
     var why: String
     var specs: String
     var edits: EditSettings
+    var editNote: String? = nil
 
     static func == (a: ShotRecord, b: ShotRecord) -> Bool { a.id == b.id && a.edits == b.edits }
     func hash(into hasher: inout Hasher) { hasher.combine(id) }
@@ -47,13 +48,15 @@ final class ShotLibrary: ObservableObject {
     }
 
     /// Writes the files (call off the main thread), then adds the record on main.
-    func store(photo: Data, thumb: UIImage, subject: String, why: String, specs: String, edits: EditSettings) {
+    func store(photo: Data, thumb: UIImage, subject: String, why: String, specs: String, edits: EditSettings,
+               editNote: String? = nil) {
         let id = UUID()
         try? photo.write(to: imageURL(id))
         if let jpg = thumb.jpegData(compressionQuality: 0.8) {
             try? jpg.write(to: thumbURL(id))
         }
-        let record = ShotRecord(id: id, date: Date(), subject: subject, why: why, specs: specs, edits: edits)
+        let record = ShotRecord(id: id, date: Date(), subject: subject, why: why, specs: specs, edits: edits,
+                                editNote: editNote)
         DispatchQueue.main.async {
             self.shots.append(record)
             self.persist()
