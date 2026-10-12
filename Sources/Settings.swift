@@ -8,6 +8,15 @@ enum AIModel: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    /// Same model on OpenRouter.
+    var openRouterID: String {
+        switch self {
+        case .sonnet: return "anthropic/claude-sonnet-5.5"
+        case .haiku: return "anthropic/claude-haiku-5.5"
+        case .opus: return "anthropic/claude-opus-5.5"
+        }
+    }
+
     var label: String {
         switch self {
         case .sonnet: return "Sonnet 5.5 (best balance)"
@@ -66,23 +75,33 @@ struct SettingsView: View {
     @State private var key: String = KeyStore.load()
     @AppStorage("aiModel") private var model: String = AIModel.sonnet.rawValue
     @AppStorage("autoShoot") private var autoShoot: Bool = true
+    @AppStorage("customModel") private var customModel: String = ""
+
+    private var trimmedKey: String { key.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    private var keyStatus: String {
+        if trimmedKey.isEmpty {
+            return "No key yet: Scan uses a basic on-device guess. Paste a Claude key (platform.claude.com) or an OpenRouter key (openrouter.ai/keys)."
+        }
+        return AIScout.isOpenRouter(trimmedKey)
+            ? "OpenRouter key: uses your OpenRouter credits. Saved on this phone only."
+            : "Claude key: uses your Anthropic credits. Saved on this phone only."
+    }
 
     var body: some View {
         NavigationStack {
             Form {
                 Section {
-                    SecureField("sk-ant-…", text: $key)
+                    SecureField("sk-ant-… or sk-or-…", text: $key)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                     Button("Paste from clipboard") {
                         if let s = UIPasteboard.general.string { key = s }
                     }
                 } header: {
-                    Text("Claude API key")
+                    Text("API key")
                 } footer: {
-                    Text(key.isEmpty
-                         ? "No key yet: Scan uses a basic on-device guess. Get a key at platform.claude.com → API Keys."
-                         : "Key saved on this phone only.")
+                    Text(keyStatus)
                 }
 
                 Section {
@@ -95,6 +114,18 @@ struct SettingsView: View {
                     .labelsHidden()
                 } header: {
                     Text("AI model")
+                }
+
+                if AIScout.isOpenRouter(trimmedKey) {
+                    Section {
+                        TextField("e.g. openai/gpt-6-luna", text: $customModel)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                    } header: {
+                        Text("Other OpenRouter model (optional)")
+                    } footer: {
+                        Text("Leave empty to use the model picked above. Must be a model that can see images.")
+                    }
                 }
 
                 Section {

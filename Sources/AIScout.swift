@@ -15,6 +15,7 @@ enum AIScoutError: LocalizedError {
         switch self {
         case .http(let code, let message):
             if code == 401 { return "API key not accepted. Check it in Settings." }
+            if code == 402 { return "Out of credits on that API account." }
             return "AI error \(code): \(message)"
         case .unreadable:
             return "Couldn't read the AI's answer. Try again."
@@ -26,7 +27,24 @@ enum AIScoutError: LocalizedError {
 enum AIScout {
     static let photoAspect = 4.0 / 5.0
 
-    static func findShot(jpeg: Data, width: Int, height: Int, apiKey: String, model: String) async throws -> ShotIdea {
+    /// OpenRouter keys start with "sk-or-"; anything else goes to Anthropic directly.
+    static func isOpenRouter(_ key: String) -> Bool { key.hasPrefix("sk-or-") }
+
+    static func findShot(jpeg: Data, width: Int, height: Int, apiKey: String, model: AIModel,
+                         customModel: String) async throws -> ShotIdea {
+        let text: String
+        if isOpenRouter(apiKey) {
+            text = try await askOpenRouter(jpeg: jpeg, width: width, height: height, apiKey: apiKey,
+                                           model: customModel.isEmpty ? model.openRouterID : customModel)
+        } else {
+            text = try await askAnthropic(jpeg: jpeg, width: width, height: height, apiKey: apiKey,
+                                          model: model.rawValue)
+        }
+        return try parse(text: text, width: width, height: height)
+    }
+
+    private static func askAnthropic(jpeg: Data, width: Int, height: Int, apiKey: String,
+                                     model: String) async throws -> String {
         var request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
         request.httpMethod = "POST"
         request.timeoutInterval = 40
@@ -56,10 +74,57 @@ enum AIScout {
 
         let (data, response) = try await URLSession.shared.data(for: request)
         let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-        guard code == 200 else {
-            throw AIScoutError.http(code, errorMessage(from: data))
+        guard code == 200 else { throw AIScoutError.http(code, errorMessage(from: data)) }
+
+        let reply = try JSONDecoder().decode(Reply.self, from: data)
+        return reply.content.compactMap { $0.text }.joined()
+    }
+
+    private static func askOpenRouter(jpeg: Data, width: Int, height: Int, apiKey: String,
+                                      model: String) async throws -> String {
+        var request = URLRequest(url: URL(string: "https://openrouter.ai/api/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 40
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Aimshot", forHTTPHeaderField: "X-Title")
+
+        let body: [String: Any] = [
+            "model": model,
+            "max_tokens": 300,
+            "messages": [[
+                "role": "user",
+                "content": [
+                    [
+                        "type": "image_url",
+                        "image_url": ["url": "data:image/jpeg;base64,\(jpeg.base64EncodedString())"]
+                    ],
+                    ["type": "text", "text": prompt(width: width, height: height)]
+                ]
+            ]]
+        ]
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard code == 200 else { throw AIScoutError.http(code, errorMessage(from: data)) }
+
+        // OpenAI-style reply: choices[0].message.content (a string, or a list of text parts).
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw AIScoutError.unreadable
         }
-        return try parse(data, width: width, height: height)
+        if let err = obj["error"] as? [String: Any], let message = err["message"] as? String {
+            throw AIScoutError.http(code, message)
+        }
+        guard let choices = obj["choices"] as? [[String: Any]],
+              let message = choices.first?["message"] as? [String: Any] else {
+            throw AIScoutError.unreadable
+        }
+        if let text = message["content"] as? String { return text }
+        if let parts = message["content"] as? [[String: Any]] {
+            return parts.compactMap { $0["text"] as? String }.joined()
+        }
+        throw AIScoutError.unreadable
     }
 
     static func prompt(width: Int, height: Int) -> String {
@@ -91,9 +156,7 @@ enum AIScout {
         let box: [Double]
     }
 
-    static func parse(_ data: Data, width: Int, height: Int) throws -> ShotIdea {
-        let reply = try JSONDecoder().decode(Reply.self, from: data)
-        let text = reply.content.compactMap { $0.text }.joined()
+    static func parse(text: String, width: Int, height: Int) throws -> ShotIdea {
         guard let start = text.firstIndex(of: "{"),
               let end = text.lastIndex(of: "}"),
               start < end,

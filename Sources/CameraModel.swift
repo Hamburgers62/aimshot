@@ -362,8 +362,10 @@ final class CameraModel: NSObject, ObservableObject {
         let z0 = zoomFactor
         let geo = geometry
         scanZoom = zoomFactor
-        let key = KeyStore.load()
-        let model = UserDefaults.standard.string(forKey: "aiModel") ?? AIModel.sonnet.rawValue
+        let key = KeyStore.load().trimmingCharacters(in: .whitespacesAndNewlines)
+        let model = AIModel(rawValue: UserDefaults.standard.string(forKey: "aiModel") ?? "") ?? .sonnet
+        let customModel = (UserDefaults.standard.string(forKey: "customModel") ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
 
         requestSnapshot { [weak self] buffer in
             guard let self = self else { return }
@@ -387,7 +389,7 @@ final class CameraModel: NSObject, ObservableObject {
             Task {
                 do {
                     let idea = try await AIScout.findShot(jpeg: snap.data, width: snap.width, height: snap.height,
-                                                          apiKey: key, model: model)
+                                                          apiKey: key, model: model, customModel: customModel)
                     await MainActor.run {
                         guard token == self.scanToken else { return }
                         self.setTarget(rect: idea.rect, r: r0, zoom: z0, geo: geo,
