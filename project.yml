@@ -15,7 +15,7 @@ targets:
       properties:
         CFBundleDisplayName: Aimshot
         CFBundleShortVersionString: "0.10"
-        CFBundleVersion: "11"
+        CFBundleVersion: "12"
         UILaunchScreen: {}
         UIRequiresFullScreen: true
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
