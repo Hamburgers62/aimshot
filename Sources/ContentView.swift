@@ -274,6 +274,13 @@ struct ContentView: View {
             stops.sort()
         }
         return HStack(spacing: 4) {
+            if !camera.lensName.isEmpty {
+                Text(camera.lensName.lowercased())
+                    .font(Theme.ui(10, .semibold))
+                    .foregroundColor(Theme.muted)
+                    .rotationEffect(iconAngle)
+                    .frame(width: 52)
+            }
             ForEach(stops, id: \.self) { s in
                 let active = abs(s - current) < 0.06
                 Button {

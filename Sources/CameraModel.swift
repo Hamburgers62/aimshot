@@ -35,6 +35,8 @@ final class CameraModel: NSObject, ObservableObject {
     @Published var isShooting = false
     @Published var flash = false
     @Published var rawSupported = false
+    /// Which physical lens is in use right now ("Ultra wide", "Main", "Tele").
+    @Published var lensName: String = ""
     @Published var exposureBias: Double = 0
     @Published var exposureRange: ClosedRange<Double> = -2...2
 
@@ -50,6 +52,7 @@ final class CameraModel: NSObject, ObservableObject {
     private var rawFormat: OSType? = nil                 // sessionQueue
     private var photoDelegate: PhotoCaptureDelegate?     // sessionQueue
     private var zoomObservation: NSKeyValueObservation?
+    private var lensObservation: NSKeyValueObservation?
     private let ciContext = CIContext()
 
     // MARK: Motion + geometry (main thread)
@@ -216,6 +219,17 @@ final class CameraModel: NSObject, ObservableObject {
             self.zoomStops = stops
             self.teleZoom = hasTele ? (switches.last ?? uw * 2) : uw * 2
             if biasLow < biasHigh { self.exposureRange = biasLow...biasHigh }
+        }
+
+        lensObservation = device.observe(\.activePrimaryConstituent, options: [.initial, .new]) { [weak self] dev, _ in
+            let name: String
+            switch dev.activePrimaryConstituent?.deviceType {
+            case .builtInUltraWideCamera?: name = "Ultra wide"
+            case .builtInWideAngleCamera?: name = "Main"
+            case .builtInTelephotoCamera?: name = "Tele"
+            default: name = ""
+            }
+            DispatchQueue.main.async { self?.lensName = name }
         }
 
         zoomObservation = device.observe(\.videoZoomFactor, options: [.initial, .new]) { [weak self] dev, _ in
@@ -804,6 +818,7 @@ final class CameraModel: NSObject, ObservableObject {
         let score = (target?.score ?? 0) > 0 ? target?.score : nil
         let matched = Self.matchedLook(style: target?.style ?? "", lowLight: isLowLight)
         let wantRaw = rawSupported && UserDefaults.standard.bool(forKey: "raw")
+        let dark = isLowLight
         let flashMode = FlashSetting.current.mode
 
         haptic(.heavy)
@@ -811,7 +826,7 @@ final class CameraModel: NSObject, ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { self.flash = false }
 
         sessionQueue.async {
-            let settings = self.makeSettings(raw: wantRaw, flash: flashMode)
+            let settings = self.makeSettings(raw: wantRaw, flash: flashMode, lowLight: dark)
             if let conn = self.photoOutput.connection(with: .video) {
                 if #available(iOS 17.0, *) {
                     if conn.isVideoRotationAngleSupported(orient.rotationAngle) {
@@ -830,7 +845,7 @@ final class CameraModel: NSObject, ObservableObject {
     }
 
     /// Runs on sessionQueue.
-    private func makeSettings(raw: Bool, flash: AVCaptureDevice.FlashMode) -> AVCapturePhotoSettings {
+    private func makeSettings(raw: Bool, flash: AVCaptureDevice.FlashMode, lowLight: Bool) -> AVCapturePhotoSettings {
         let codec: AVVideoCodecType = photoOutput.availablePhotoCodecTypes.contains(.hevc) ? .hevc : .jpeg
         let processed: [String: Any] = [AVVideoCodecKey: codec]
         let settings: AVCapturePhotoSettings
@@ -841,6 +856,20 @@ final class CameraModel: NSObject, ObservableObject {
             settings.photoQualityPrioritization = .quality   // multi-frame fusion: less noise and blur
         }
         settings.maxPhotoDimensions = photoOutput.maxPhotoDimensions
+        // In the dark, 48MP has no pixel binning: more noise, and the phone smears it away
+        // (the "oil painting" look). 12MP combines pixels and comes out much cleaner.
+        if lowLight, !raw, let d = device {
+            let full = photoOutput.maxPhotoDimensions
+            let candidates = d.activeFormat.supportedMaxPhotoDimensions.filter {
+                Int($0.width) * Int($0.height) <= Int(full.width) * Int(full.height)
+            }
+            let target = 12_000_000
+            if let binned = candidates.min(by: {
+                abs(Int($0.width) * Int($0.height) - target) < abs(Int($1.width) * Int($1.height) - target)
+            }) {
+                settings.maxPhotoDimensions = binned
+            }
+        }
         if photoOutput.supportedFlashModes.contains(flash) {
             settings.flashMode = flash
         }
@@ -851,7 +880,7 @@ final class CameraModel: NSObject, ObservableObject {
     /// to Photos (with your default look or an AI-picked edit) and to the shot history.
     /// A look that suits the kind of shot (only used when you haven't set one yourself).
     static func matchedLook(style: String, lowLight: Bool) -> String? {
-        guard UserDefaults.standard.object(forKey: "matchLook") as? Bool ?? true else { return nil }
+        guard UserDefaults.standard.object(forKey: "matchLook") as? Bool ?? false else { return nil }
         switch style {
         case "portrait": return "soft"
         case "glow": return lowLight ? "ember" : "golden"

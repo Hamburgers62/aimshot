@@ -258,7 +258,7 @@ struct SettingsView: View {
     @AppStorage("autoScan") private var autoScan: Bool = false
     @AppStorage("aiEditNew") private var aiEditNew: Bool = false
     @AppStorage("refine") private var refine: Bool = true
-    @AppStorage("matchLook") private var matchLook: Bool = true
+    @AppStorage("matchLook") private var matchLook: Bool = false
     @AppStorage("startLens") private var startLens: String = "wide"
     @AppStorage("showGrid") private var showGrid: Bool = true
     @AppStorage("showLevel") private var showLevel: Bool = true

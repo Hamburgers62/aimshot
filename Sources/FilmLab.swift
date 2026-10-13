@@ -27,13 +27,11 @@ struct EditSettings: Codable, Equatable {
         var s = EditSettings()
         let lookID = (d["look"] as? String)?.lowercased() ?? "none"
         s.apply(look: FilmLab.look(lookID))
-        if let v = num("strength") { s.intensity = clamp(v, 0, 1) }
-        if let v = num("exposure") { s.exposure = clamp(v, -1, 1) }
-        if let v = num("warmth") { s.warmth = clamp(v, -1, 1) }
-        if let v = num("fade") { s.fade = clamp(v, 0, 1) }
-        if let v = num("grain") { s.grain = clamp(v, 0, 0.6) }
-        if let v = num("halation") { s.halation = clamp(v, 0, 1) }
-        if let v = num("vignette") { s.vignette = clamp(v, 0, 1) }
+        // The AI only picks the look, its strength and small fixes; the look's own
+        // grain, glow and vignette stay as tuned, so edits can't stack into a mess.
+        if let v = num("strength") { s.intensity = clamp(v, 0.3, 1) }
+        if let v = num("exposure") { s.exposure = clamp(v, -0.5, 0.5) }
+        if let v = num("warmth") { s.warmth = clamp(s.warmth + v, -0.35, 0.35) }
         if let f = (d["frame"] as? String).flatMap({ FrameStyle(rawValue: $0.lowercased()) }) { s.frame = f }
         if let b = d["dateStamp"] as? Bool { s.dateStamp = b }
         return s
@@ -95,66 +93,67 @@ struct FilmLook: Identifiable, Equatable {
 enum FilmLab {
     static let context = CIContext()
 
+    // Tuned on real photos (day, night, portraits). Kept subtle on purpose.
     static let looks: [FilmLook] = [
         FilmLook(id: "none", name: "Original", recipe: LookRecipe(),
                  warmth: 0, fade: 0, grain: 0, halation: 0, vignette: 0),
         FilmLook(id: "natural", name: "Natural",
-                 recipe: LookRecipe(contrast: 2.5, lift: 0.015, shoulder: 0.02, saturation: 1.02,
-                                    highlightDesat: 0.2, shadowDesat: 0.1,
-                                    shadowTint: SIMD3(0, 0.003, 0.008), highlightTint: SIMD3(0.012, 0.006, 0),
-                                    greenShift: 0.2),
-                 warmth: 0.03, fade: 0, grain: 0.05, halation: 0, vignette: 0),
-        FilmLook(id: "golden", name: "Golden 200",
-                 recipe: LookRecipe(contrast: 4, lift: 0.035, shoulder: 0.04, saturation: 1.05,
-                                    highlightDesat: 0.3, shadowDesat: 0.2,
-                                    shadowTint: SIMD3(0.005, 0.005, 0.02), highlightTint: SIMD3(0.04, 0.022, -0.02),
-                                    greenShift: 0.5, blueShift: 0.2),
-                 warmth: 0.1, fade: 0.03, grain: 0.12, halation: 0.05, vignette: 0.05),
-        FilmLook(id: "soft", name: "Soft 400",
-                 recipe: LookRecipe(contrast: 3, lift: 0.05, shoulder: 0.05, saturation: 0.92,
-                                    highlightDesat: 0.35, shadowDesat: 0.25,
-                                    shadowTint: SIMD3(-0.005, 0.01, 0.018), highlightTint: SIMD3(0.03, 0.02, 0.005),
-                                    greenShift: 0.4, blueShift: 0.3),
-                 warmth: 0.05, fade: 0.04, grain: 0.1, halation: 0, vignette: 0),
-        FilmLook(id: "night", name: "Night 800",
-                 recipe: LookRecipe(contrast: 5, lift: 0.03, shoulder: 0.03, saturation: 0.95,
-                                    highlightDesat: 0.35, shadowDesat: 0.3,
-                                    shadowTint: SIMD3(-0.015, 0.012, 0.035), highlightTint: SIMD3(0.04, 0.015, -0.02),
-                                    greenShift: 0.3, blueShift: 0.6),
-                 warmth: 0, fade: 0.02, grain: 0.15, halation: 0.18, vignette: 0.06),
-        FilmLook(id: "ember", name: "Ember",
-                 recipe: LookRecipe(contrast: 5.5, lift: 0.02, shoulder: 0.07, saturation: 0.9,
-                                    highlightDesat: 0.4, shadowDesat: 0.35,
-                                    shadowTint: SIMD3(0.018, 0.0, -0.008), highlightTint: SIMD3(0.05, 0.02, -0.03),
-                                    greenShift: 0.6, blueShift: 0.3),
-                 warmth: 0.06, fade: 0, grain: 0.12, halation: 0.1, vignette: 0.12, ev: -0.3),
-        FilmLook(id: "tide", name: "Tide",
-                 recipe: LookRecipe(contrast: 4.5, lift: 0.045, shoulder: 0.04, saturation: 0.82,
-                                    highlightDesat: 0.35, shadowDesat: 0.3,
-                                    shadowTint: SIMD3(-0.012, 0.01, 0.035), highlightTint: SIMD3(0.005, 0.01, 0.012),
-                                    greenShift: 0.3, blueShift: 0.7),
-                 warmth: -0.06, fade: 0.03, grain: 0.1, halation: 0, vignette: 0.08, ev: -0.2),
-        FilmLook(id: "slide", name: "Slide",
-                 recipe: LookRecipe(contrast: 6, lift: 0, shoulder: 0.015, saturation: 1.15,
+                 recipe: LookRecipe(contrast: 2.2, lift: 0.01, shoulder: 0.015, saturation: 1.03,
                                     highlightDesat: 0.15, shadowDesat: 0.1,
-                                    shadowTint: SIMD3(0, 0, 0.015), highlightTint: SIMD3(0.01, 0.005, 0),
-                                    greenShift: 0.1, blueShift: 0.2),
-                 warmth: -0.03, fade: 0, grain: 0.06, halation: 0, vignette: 0.04),
-        FilmLook(id: "faded", name: "Faded",
-                 recipe: LookRecipe(contrast: 2.5, lift: 0.11, shoulder: 0.07, saturation: 0.82,
+                                    shadowTint: SIMD3(-0.004, 0.002, 0.008), highlightTint: SIMD3(0.01, 0.005, -0.004),
+                                    greenShift: 0.12, blueShift: 0.1),
+                 warmth: 0.02, fade: 0, grain: 0.04, halation: 0, vignette: 0),
+        FilmLook(id: "golden", name: "Golden 200",
+                 recipe: LookRecipe(contrast: 3, lift: 0.015, shoulder: 0.03, saturation: 1.04,
+                                    highlightDesat: 0.25, shadowDesat: 0.15,
+                                    shadowTint: SIMD3(0.006, 0.002, -0.006), highlightTint: SIMD3(0.03, 0.018, -0.022),
+                                    greenShift: 0.2, blueShift: 0.15),
+                 warmth: 0.06, fade: 0, grain: 0.08, halation: 0.04, vignette: 0.05),
+        FilmLook(id: "soft", name: "Soft 400",
+                 recipe: LookRecipe(contrast: 2.0, lift: 0.02, shoulder: 0.035, saturation: 0.95,
+                                    highlightDesat: 0.3, shadowDesat: 0.15,
+                                    shadowTint: SIMD3(-0.006, 0.006, 0.012), highlightTint: SIMD3(0.022, 0.012, -0.008),
+                                    greenShift: 0.3, blueShift: 0.25),
+                 warmth: 0.04, fade: 0, grain: 0.07, halation: 0, vignette: 0),
+        FilmLook(id: "night", name: "Night 800",
+                 recipe: LookRecipe(contrast: 3.2, lift: 0, shoulder: 0.02, saturation: 1.0,
+                                    highlightDesat: 0.3, shadowDesat: 0.25,
+                                    shadowTint: SIMD3(-0.012, 0.004, 0.022), highlightTint: SIMD3(0.025, 0.01, -0.015),
+                                    greenShift: 0.2, blueShift: 0.4),
+                 warmth: -0.04, fade: 0, grain: 0.1, halation: 0.18, vignette: 0),
+        FilmLook(id: "ember", name: "Ember",
+                 recipe: LookRecipe(contrast: 3.8, lift: 0.005, shoulder: 0.04, saturation: 0.95,
                                     highlightDesat: 0.3, shadowDesat: 0.3,
-                                    shadowTint: SIMD3(0, 0.008, 0.02), highlightTint: SIMD3(0.02, 0.015, 0.0),
-                                    greenShift: 0.4, blueShift: 0.4),
-                 warmth: 0.03, fade: 0, grain: 0.1, halation: 0, vignette: 0),
+                                    shadowTint: SIMD3(-0.006, 0.002, 0.006), highlightTint: SIMD3(0.035, 0.012, -0.025),
+                                    greenShift: 0.45, blueShift: 0.3),
+                 warmth: 0.05, fade: 0, grain: 0.08, halation: 0.08, vignette: 0.1),
+        FilmLook(id: "tide", name: "Tide",
+                 recipe: LookRecipe(contrast: 2.8, lift: 0.02, shoulder: 0.03, saturation: 0.88,
+                                    highlightDesat: 0.3, shadowDesat: 0.2,
+                                    shadowTint: SIMD3(-0.01, 0.008, 0.016), highlightTint: SIMD3(0.004, 0.008, 0.006),
+                                    greenShift: 0, blueShift: 0.5),
+                 warmth: -0.06, fade: 0, grain: 0.07, halation: 0, vignette: 0.04),
+        FilmLook(id: "slide", name: "Slide",
+                 recipe: LookRecipe(contrast: 4.2, lift: 0, shoulder: 0.015, saturation: 1.12,
+                                    highlightDesat: 0.15, shadowDesat: 0.15,
+                                    shadowTint: SIMD3(-0.004, 0, 0.01), highlightTint: SIMD3(0.008, 0.004, 0),
+                                    greenShift: 0.08, blueShift: 0.15),
+                 warmth: 0, fade: 0, grain: 0.05, halation: 0, vignette: 0.05),
+        FilmLook(id: "faded", name: "Faded",
+                 recipe: LookRecipe(contrast: 2.2, lift: 0.055, shoulder: 0.05, saturation: 0.85,
+                                    highlightDesat: 0.3, shadowDesat: 0.25,
+                                    shadowTint: SIMD3(-0.004, 0.006, 0.012), highlightTint: SIMD3(0.015, 0.01, 0),
+                                    greenShift: 0.3, blueShift: 0.3),
+                 warmth: 0.03, fade: 0, grain: 0.08, halation: 0, vignette: 0),
         FilmLook(id: "mono", name: "Mono",
-                 recipe: LookRecipe(contrast: 4.5, lift: 0.03, shoulder: 0.03,
-                                    shadowTint: SIMD3(0, 0, 0.006), highlightTint: SIMD3(0.008, 0.004, 0),
-                                    mono: SIMD3(0.32, 0.52, 0.16)),
-                 warmth: 0, fade: 0.03, grain: 0.15, halation: 0, vignette: 0.04),
+                 recipe: LookRecipe(contrast: 3.0, lift: 0.015, shoulder: 0.025,
+                                    shadowTint: SIMD3(0, 0, 0.004), highlightTint: SIMD3(0.006, 0.003, 0),
+                                    mono: SIMD3(0.3, 0.55, 0.15)),
+                 warmth: 0, fade: 0, grain: 0.12, halation: 0, vignette: 0.04),
         FilmLook(id: "noir", name: "Noir",
-                 recipe: LookRecipe(contrast: 8, lift: 0, shoulder: 0.01,
-                                    mono: SIMD3(0.5, 0.4, 0.1)),
-                 warmth: 0, fade: 0, grain: 0.12, halation: 0, vignette: 0.1)
+                 recipe: LookRecipe(contrast: 5.0, lift: 0, shoulder: 0.01,
+                                    mono: SIMD3(0.45, 0.45, 0.1)),
+                 warmth: 0, fade: 0, grain: 0.1, halation: 0, vignette: 0.1)
     ]
 
     static func look(_ id: String) -> FilmLook {
@@ -227,8 +226,10 @@ enum FilmLab {
         c = grey + chroma
 
         // Split toning.
-        let shadowWeight: Double = (1 - y) * (1 - y)
-        let highlightWeight: Double = y * y
+        // Peaks in the mid-shadows / mid-highlights, so pure black and pure white stay clean.
+        let inv: Double = 1 - y
+        let shadowWeight: Double = 6.75 * y * inv * inv
+        let highlightWeight: Double = 6.75 * y * y * inv
         let shadowPart: SIMD3<Double> = p.shadowTint * shadowWeight
         let highlightPart: SIMD3<Double> = p.highlightTint * highlightWeight
         c += shadowPart

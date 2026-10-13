@@ -156,16 +156,26 @@ enum AIScout {
 
     static func suggestEdit(jpeg: Data, key: String, model: String, subject: String) async throws
         -> (settings: EditSettings, note: String) {
-        let looks = FilmLab.looks.map { "\($0.id) (\($0.name))" }.joined(separator: ", ")
         let p = """
-        You are the photo editor in a film-camera app. Look at this photo (subject: \(subject)) and choose the edit that makes it look its best, like a tasteful film photographer would.
+        You are the photo editor in a film-camera app. Look at this photo (subject: \(subject)) and pick the film look that suits it best, like a tasteful photographer would. Subtle beats dramatic.
 
-        Available looks: \(looks). "none" keeps natural colours; mono and noir are black and white.
+        Looks:
+        - none: untouched
+        - natural: barely-there polish, safe for anything
+        - golden: warm, sunny, nostalgic; daylight, autumn, golden hour
+        - soft: gentle and flattering; portraits and people in soft light
+        - night: cool shadows, glowing lights; night scenes with street lights or neon
+        - ember: warm and moody with deeper contrast; lamps, candles, cosy interiors, warm night light
+        - tide: cool and calm; overcast days, water, blue hour
+        - slide: punchy and vivid; bright colourful daylight scenes
+        - faded: matte and pastel; bright daytime only (never at night)
+        - mono: classic black and white
+        - noir: high-contrast black and white; strong light and shadow
 
         Reply with ONLY this JSON, no markdown, no other text:
-        {"look": "look id", "strength": 0.0-1.0, "exposure": -1.0-1.0, "warmth": -1.0-1.0, "fade": 0.0-1.0, "grain": 0.0-0.6, "halation": 0.0-1.0, "vignette": 0.0-1.0, "note": "max 10 words, lowercase, why this edit"}
+        {"look": "look id", "strength": 0.4-1.0, "exposure": -0.5-0.5, "warmth": -0.3-0.3, "note": "max 10 words, lowercase, why this look"}
 
-        Keep it subtle: small exposure fixes, grain under 0.3 unless the photo really calls for it, halation only when there are light sources.
+        exposure and warmth are small corrections only; use 0 if the photo is already right. If unsure, choose natural.
         """
         let text = try await ask(jpeg: jpeg, prompt: p, key: key, model: model, maxTokens: 1200)
         guard let dict = extractJSON(text) as? [String: Any] else { throw AIScoutError.unreadable(snippet(text)) }
